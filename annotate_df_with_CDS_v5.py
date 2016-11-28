@@ -112,7 +112,7 @@ def annotate_from_gb(inMutDf, genBankFileName, annotateBest = True):
 
 def match_alleleTbl(uniqueMutDf, alleleTblFilename = 'Allele.xlsx'):
     """ 
-    match unique mutations against known mutations from the allele table 
+    match mutations (unique or all) against known mutations from the allele table 
     return the new dataframe with matched mutations
     also return a dataframe of unmatched mutations that are likely to be 
     targeted modifications
