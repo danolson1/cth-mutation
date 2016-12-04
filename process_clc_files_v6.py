@@ -160,11 +160,19 @@ def combineMutations(inBpDf = None, svDf = None, coverageDf = None, snpDf = None
     # match breakpoints
     # check to make sure cleanSv and cleanBp are both present
     if (cleanSv is not None) and (cleanBp is not None):
-        print('\n### matching %s breakpoints to sv ###' %(str(len(identifiedBp))))
-        # match to clean SV mutations, collect unmatched breakpoints
-        (matchedSv, remainingBp1) = match_bp_to_sv(cleanSv, identifiedBp)   
-        print('\n### matching %s breakpoints to transposons ###' %(str(len(remainingBp1))))
+        # match breakpoints to clean SV mutations, keep only SVs that have matched breakpoints, 
+        # collect unmatched breakpoints
+        print('\n### matching %s breakpoints to sv ###' %(str(len(identifiedBp)))) 
+        (matchedSv, remainingBp1) = match_bp_to_sv(cleanSv, identifiedBp)
+          
+        # keep the SV mutations who didn't match any breakpoints
+        # the evidence that they're real is less strong than for the matchedSv mutations, 
+        # but we may still be interested in them
+        leftoverCleanSv = cleanSv.loc[~cleanSv.index.isin(matchedSv.index), ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'Variant ratio', 'Name', 'Source']]
+        leftoverCleanSv.rename(columns = {'Name':'Type', 'Variant ratio':'readFrac'}, inplace = True)
+           
         # match transposon insertions 
+        print('\n### matching %s breakpoints to transposons ###' %(str(len(remainingBp1))))
         (matchedIns, remainingBp2) = match_insertions(remainingBp1, 
                                                       maxDist = 50, 
                                                       seqList = 'Cth_transposons.fa', 
@@ -181,11 +189,13 @@ def combineMutations(inBpDf = None, svDf = None, coverageDf = None, snpDf = None
     
     
     
-    # export list of unmatched breakpoints ** need to implement this **
-    result = pd.concat([cleanSnp, cleanI, matchedIns, matchedIns2, matchedSv])
+    # export list of unmatched breakpoints
+    remainingBp3.to_csv('unmatched_breakpoints.csv')
+    
     # combine mutations from all dataframes
-       # insertions
-       # matched to clean SV mutations
+    # need to check for duplicate mutations, strain LL1380 is good test case for this
+    result = pd.concat([cleanSnp, cleanI, matchedIns, matchedIns2, matchedSv, leftoverCleanSv])
+
      
     # match to known mutations and identify with unique mutation ID
     
@@ -215,7 +225,8 @@ def cleanIndel(rawIndel):
     # fix chromosome spaces
     result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
     
-    result.rename(columns = {'Variant ratio':'readFrac'}, inplace=True)
+    result.rename(columns = {
+}, inplace=True)
     
     # make new Source column
     result['Source'] = 'indel_data'
@@ -520,6 +531,7 @@ def match_bp_to_sv(inSv, inBpDf):
     this would give us an "AlleleID" column
     """
     tsv = inSv.copy()
+    tsv['Left breakpoints'] = tsv['Left breakpoints'].astype(int).astype(str) # cast this as a string for subsequent matching
     
     # split breakpoints into left and right matches
     tbp = inBpDf.copy()
@@ -632,22 +644,28 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
      - return the list
      """
     # look at the files in the input file path (inFilePath) and import them into a dataframe
+    # Note, the file output format changed when I upgraded from CLC workbench v8 to v9
     
     # regex pattern to get strain number, the type of CLC output, and the version number
     # backref 1 = strain ID
     # backref 3 = type of CLC output (threshold, BP, InDel, SV or SNP)
     #         note, SNPs are listed as 'Variants, CTRL, OA, AAC'
-    # backref 4 = version.  If empty, this is version 0.  If the workflow is run
+    # backref 6 = version.  If empty, this is version 0.  If the workflow is run
     #         multiple times, there will be numbers here.  The highest number is the 
     #         latest version
-    p = re.compile('((AG|LL)\d{3,4}).* locally realigned \((.*)\)\.?(\d{0,2})\.txt')
-    
+    p = re.compile( '((AG|LL)\d{3,4})'                          # backref 1 = strain ID
+                    '.*(Variants|InDel|BP|SV|threshold)[^._]*'  # backref 3 = type
+                    '(_low10|_high20)?'                         # backref 4 - type of threshold (optional)
+                    '(\.(\d{1,2}))?'                            # backref 6 - version (optional)
+                    '\.txt'
+                    )
+        
     typeDict = {
         'threshold':'Thr',
         'SV':'SV',
         'BP':'BP',
         'InDel':'InDel',
-        'Variants, CTRL, OA, AAC':'SNP'
+        'Variants':'SNP'
                }
     
     fileList = []
@@ -658,15 +676,19 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
             #print(result)
             strainID = result[0][0]
             fileType = typeDict[result[0][2]]
-            if result[0][3] is '': # the file doesn't have a value in the fileVers location
+            if fileType == 'Thr': # get low10 or high20 identifier
+                fileType  = fileType + result[0][3]
+            if result[0][5] is '': # the file doesn't have a value in the fileVers location
                 fileVers = 0
             else:
-                fileVers = int(result[0][3]) # get the value
+                fileVers = int(result[0][5]) # get the value
     
             row = [file, strainID, fileType, fileVers]
             fileList.append(row)
         
     clcFilesDf = pd.DataFrame(fileList, columns = ['Filename', 'StrainID', 'Type', 'Version'])
+    ### for testing
+    clcFilesDf.to_excel('clcFilesDf.xlsx')
     
     # for each strain and type, make sure we only select the row with the highest version number
     maxVersionIndex = clcFilesDf.groupby(['StrainID', 'Type'])['Version'].transform(max) == clcFilesDf['Version']
@@ -683,7 +705,7 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
         mTbl.drop(['Index'], axis=1, inplace=True)
     
     # make a dataframe for each of the 5 input file types
-    typeList = ['BP', 'InDel', 'SV', 'Thr', 'SNP']
+    typeList = ['BP', 'InDel', 'SV', 'Thr_low10', 'Thr_high20', 'SNP']
     resultDict = dict(zip(typeList, [None]*len(typeList)))
     # loop through types
     for item in typeList:
