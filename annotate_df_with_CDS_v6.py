@@ -127,17 +127,33 @@ def match_alleleTbl(uniqueMutDf, alleleTblFilename = 'Allele.xlsx'):
     alleleSlice = alleleTbl.loc[:, ['ChromosomeID', 'Start', 'End', 'Type', 'Description','AlleleID', 'AlleleName']]
     
     # match mutations
-    result = uniqueMutDf.merge(alleleSlice, how='left', left_on = ['Chromosome', 'StartReg', 'EndReg', 'Type', 'Description'], 
-               right_on = ['ChromosomeID', 'Start', 'End', 'Type', 'Description'])
+    result = uniqueMutDf.merge(alleleSlice, how='left', left_on = ['Chromosome', 'Type', 'Description'], 
+               right_on = ['ChromosomeID', 'Type', 'Description'])
+               
+    result['sDist'] = result['StartReg'] - result['Start']
+    result['eDist'] = result['EndReg'] - result['End']
+    result['totDist'] = result['sDist'].abs() + result['eDist'].abs()
+    
+    closeMatch = result['totDist'] < 6 # allow a total difference of 6 bp for matches
+    result = result.loc[closeMatch, :]
     
     # make a table of alleles that weren't matched
-    nullAlleleID = result['AlleleID'].isnull()
-    notSnp = result['Source'] != 'snp_data'
-    notTransp = result['Source'] != 'match_insertion_Cth_t'
-    notTdup = result['Type'] != 'Tandem duplication'
-    notMatched = result.loc[nullAlleleID & notSnp & notTransp & notTdup, :]
+    umdf = uniqueMutDf.copy()
+    umdf = umdf.merge(result.loc[:, ['AlleleID', 'mutID']], on='mutID', how='left')
+    nullAlleleID = umdf['AlleleID'].isnull()
     
-    return (result, notMatched)
+    notSnp = umdf['Source'] != 'snp_data'
+    notTransp = umdf['Source'] != 'match_insertion_Cth_t'
+    notTdup = umdf['Type'] != 'Tandem duplication'
+    rightChrom = umdf['Chromosome'] == chromosomeDict['Cth_DSM_1313_genome']
+    notMatched = umdf.loc[nullAlleleID & notSnp & notTransp & notTdup & rightChrom, :]
+    
+    uniqueNotMatched = notMatched.loc[:, ['mutID', 'Chromosome', 
+                                          'StartReg', 'EndReg', 'Description', 
+                                          'Type', 'Annotation name']]
+    uniqueNotMatched.drop_duplicates(inplace = True)
+        
+    return (result, uniqueNotMatched)
 
      
 
@@ -213,21 +229,24 @@ def find_unique_mutations(inMut):
     # identified the mutation) for identifying unique mutations, but 
     # I don't actually think that's an important distinction, since the other parts are what 
     # define a unique mutation
-    result = inMut.loc[:, ('Chromosome', 'StartReg', 'EndReg', 'Type', 'Description', 'Source')]
+    result = inMut.loc[:, ('Chromosome', 'StartReg', 'EndReg', 'Type', 'Description')]
     result.drop_duplicates(inplace = True)
     
+    """
+    12-5-2016, not needed now that 'Source' is not included
     # check to see if there are multiple rows that differ only by source
     dupRows = result[result.duplicated(['Chromosome', 'StartReg', 'EndReg', 'Type', 'Description'])]
     if len(dupRows) > 0:
         print("find_unique_mutations ERROR: same mutation from multiple sources identified")
         print(dupRows)
+    """
     
+    # clean up result
     result.sort_values('StartReg', inplace=True)
     result.reset_index(drop = True, inplace = True) # get rid of original index
     result.reset_index(inplace = True) # move new index to a column called 'index'
     result.rename(columns={'index':'mutID'}, inplace=True)
     return result
-    
 
 #--------------------------------------------------------------------------------------
 # find overlapping mutations

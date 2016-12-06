@@ -39,11 +39,191 @@ sys.path.insert(0, r'C:\Users\Dan\Documents\GitHub\cth-mutation') # for loading 
 # master strain list path
 mslPath = r'C:\Users\Dan\Documents\Lynd Lab research\Ctherm CBP project\Big database project  - SFRE\--MANUSCRIPT--\Master strain list 11-29-2016.xlsx'
 
+# for finding origin mutations
+rootStrainID = 'LL1004'
+
 # distance matricies
 # module-level variables because we only expect to have one set per instance
 distMat = None
 newMutMat = None
 lostMutMat = None
+
+    
+def find_origin_mutations(inMut, strainTbl):
+    """
+    strainTbl is a table with all of the parent-child relationships, 
+    i.e. complete LLStrains table
+    it needs to have the following columns:
+        "StrainID" with the strain ID and
+        "Parent strain" with the parent strain ID
+    inMut is a list of mutations.  It needs to have the following columns:
+        "mutID," unique mutation identifier
+        "Strain," strain ID
+    """
+    # first find the list of strains that have mutations in the mutation table 
+    strainList = inMut['Strain'].unique().tolist()
+    
+    # get the nearest parent with mutation data
+    # the resulting dataframe has 2 columns: StrainID and ParentID
+    parChiDf = findParentList(strainList, strainTbl)
+    
+    # add parent strain column
+    inMut = inMut.merge(parChiDf, how = 'left', left_on = 'Strain', right_on = 'StrainID')
+    inMut.drop('StrainID', axis=1, inplace=True) # don't need to have this column shown twice
+    
+    # make series to hold origin mutation flag, start with all false values
+    originMutSer = pd.Series([False] * len(inMut)) 
+    for index, row in inMut.iterrows():
+        # if mutation is not in parent strain, it's an origin mutation
+        #print(index, 'checking mutID=', row['mutID'])
+        pID = row['ParentID']
+        if row['mutID'] not in inMut.loc[inMut['Strain'] == pID, 'mutID'].get_values():
+            # found origin mutation
+            #print('\tfound origin mutation, mutID=', row['mutID'], ' strain=', row['StrainID'])
+            originMutSer.loc[index] = True
+    
+    inMut['isOrigin'] = originMutSer
+    
+    return inMut
+
+def findRepeatOriginMut(originMutDf, inMut, strainTbl):
+    """
+    find origin mutations that are also present earlier in the lineage
+    these are likely to be wrong
+    either the mutation is called incorrectly (mutations on the threshold of calling appear and disappear)
+    or the strain lineage is wrong
+    originMutDf is a dataframe with just origin mutations (i.e. output of find_origin_mutations where isOrigin is true)
+    inMut is a dataframe with all mutations
+    strainTbl (i.e. LLStrains)
+    """
+    strainList = inMut['Strain'].unique().tolist()
+    parChiDf = findParentList(strainList, strainTbl) # parent child list for just the strains that have origin mutations
+    
+    repeatOriginMuts = []
+    
+    # loop through origin mutations
+    for index, row in originMutDf.iterrows():
+        parId = row['ParentID']
+        while parId != rootStrainID:
+            parentOriginMutList = originMutDf.loc[originMutDf['Strain'] == parId, 'mutID']
+            #print(row['mutID'])
+            #print(row['Strain'])
+            #print(parId)
+    
+            if row['mutID'] in parentOriginMutList.tolist():
+                repeatOriginMuts.append(index)
+                print('findRepeatOriginMut ERROR: mutation {0} from strain {1} found in parent strain {2}'.format(row['mutID'], row['Strain'], parId))
+    
+            parId = parChiDf.loc[parChiDf['StrainID'] == parId, 'ParentID'].iloc[0] # find parent of parent
+    
+    result = originMutDf.loc[originMutDf.index.isin(repeatOriginMuts), :]
+    return result
+
+
+def getStrainList(inMut):
+    """ get list of unique strains from a dataframe of mutations """
+    strainList = inMut['Strain'].unique().tolist()
+    
+    return strainList
+    
+
+
+def getStrainLineage(strainList, strainTbl):
+    """
+    calculate the lineages for all of the strains in the strain list
+    """
+    parChiDf = findParentList(strainList, strainTbl)
+
+    lineageSer = pd.Series([False] * len(parChiDf)) 
+    
+    for index, row in parChiDf.iterrows():
+        parList = []
+        parId = row['ParentID']
+        while parId != rootStrainID:
+            parList.append(parId)
+            parId = parChiDf.loc[parChiDf['StrainID'] == parId, 'ParentID'].iloc[0]
+        parList.append(rootStrainID)
+        
+        lineageSer.loc[index] = parList
+        
+    parChiDf['Lineage'] = lineageSer 
+
+    return parChiDf
+
+#--------------------------------------------------------------------------------------
+# find all parent strains from list
+#--------------------------------------------------------------------------------------
+def findParentList(strainList, strainTbl):
+    """ 
+    given a list of strain ID numbers, and a master strain table (i.e. LLStrains),
+    get the closest parent strain
+    assume that strain IDs are strings
+    empty string '' means parent not found 
+    """
+    
+    # check to see if the strainlist has the root strain, and if not, add it
+    if rootStrainID in strainList:
+        pass
+    else:
+        strainList.append(rootStrainID)
+        
+    parentStrList = []
+    
+    # loop through all of the strains
+    for strain in strainList:
+        #print('looking for parent of strain ', strain)
+        parId = findParent(strain, strainTbl) # find parent strain
+        #print('\tparent is: ', parId)
+        
+        while parId not in strainList: # is parent in list?
+            # if not, then find the parent of the parent
+            #print(parId, ' not in list')
+            parId = findParent(parId, strainTbl) 
+            #print('\tfindParentList: parent not found, new parId=', parId)
+            # if the parent strain doesnt not exist, then you can't go any further
+            if parId == '':
+                break
+        parentStrList.append([strain, parId])
+    result = pd.DataFrame(parentStrList, columns=['StrainID', 'ParentID'])
+    # get rid of rows where parent strain is empty
+    result.drop(result[result['ParentID'] == ''].index, inplace = True)
+    
+    return result
+
+#--------------------------------------------------------------------------------------
+# find a single parent strain
+#--------------------------------------------------------------------------------------
+def findParent(id, strainTbl):
+    """ 
+    Helper function for findParentsList
+    Given a strain ID and table of parent-child relationships
+    find the parent strain
+        "id" is string with strain ID
+        "strainTbl" is dataframe with strain ID and parent strain ID (i.e. LLStrains)
+            "StrainID" is strain ID
+            "ParentStrain" is parent strain ID
+    """
+    #print('findParent: id in=', id)
+    parId = '' # default "not found" value
+    
+    parResult = strainTbl.loc[strainTbl['StrainID'] == id, 'ParentStrain'] # might be null
+    if len(parResult) > 0:
+        parId = parResult.iloc[0]
+    else:
+        pass
+        #print('findParent ERROR: ', id, ' no parent found')
+       
+    # check if the strain is the wild type strain
+    if id == rootStrainID:
+        parId = 'wt'
+        
+    return parId
+
+
+
+
+
+
 
 def make_distance_matrix(annoDf):
     """
@@ -72,9 +252,12 @@ def make_distance_matrix(annoDf):
     
     # make empty distance matrix
     # these are global variables
-    global distMat = pd.DataFrame(None, index=strList, columns = strList )
-    global newMutMat = pd.DataFrame(None, index=strList, columns = strList )
-    global lostMutMat = pd.DataFrame(None, index=strList, columns = strList )
+    global distMat
+    global newMutMat
+    global lostMutMat
+    distMat = pd.DataFrame(None, index=strList, columns = strList )
+    newMutMat = pd.DataFrame(None, index=strList, columns = strList )
+    lostMutMat = pd.DataFrame(None, index=strList, columns = strList )
     
     # make distance matrix
     for par in strList:

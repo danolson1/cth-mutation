@@ -93,6 +93,12 @@ blastSubjectFiles = ['insertion_sequences.fa', # pyk(Tsc), pta merodiploid and S
                     'Cth_homology.fa', 
                     'Cth_1313_CDS_annotations.fa', 
                     'Cth_DSM_1313_genome.fa']
+
+# constants for identifying real mutations from threshold data
+# see cleanLowThreshold function
+minLowCoverageLength = 50 # ignore low coverage regions shorter than this
+maxAverageReadCoverage = 1 # ignore regions with maximum coverage higher than this
+
 ############################################################
 
 
@@ -108,20 +114,29 @@ def process_files(clcFilePath, identifiedBp = None):
     # read CLC text files, store output in a dictionary of results
     resultDict = get_clc_data_from_txt(clcFilePath)
     
-    result = combineMutations( inBpDf = resultDict['BP'],
-                               svDf = resultDict['SV'],
-                               coverageDf = resultDict['Thr'],
-                               snpDf = resultDict['SNP'],
-                               indelDf = resultDict['InDel'],
+    
+    inBpDf = resultDict['BP']
+    svDf = resultDict['SV']
+    lowThresh = resultDict['Thr_low10']
+    highThresh = resultDict['Thr_high20']
+    snpDf = resultDict['SNP']
+    indelDf = resultDict['InDel']
+    
+    result = combineMutations( inBpDf = inBpDf,
+                               svDf = svDf,
+                               lowThresh = lowThresh,
+                               highThresh = highThresh,
+                               snpDf = snpDf,
+                               indelDf = indelDf,
                                identifiedBp = identifiedBp)
     return result
     
 
-def combineMutations(inBpDf = None, svDf = None, coverageDf = None, snpDf = None, indelDf = None, identifiedBp = None):
+def combineMutations(inBpDf = None, svDf = None, lowThresh = None, highThresh = None, snpDf = None, indelDf = None, identifiedBp = None):
     """ 
     idBpDf: dataframe with identified breakpoints (from identify_breakpoints_v2.py)
     svDf: dataframe with structural variant mutations from CLC
-    coverageDf: dataframe with areas of less than 10x coverage, from CLC
+    lowThresh: dataframe with areas of less than 10x coverage, from CLC
     snpDf: dataframe with SNP variants from CLC
     indelDf: dataframe with indel variants from CLC
     identifiedBp: breakpoints that have already been identified by BLAST, 
@@ -150,14 +165,37 @@ def combineMutations(inBpDf = None, svDf = None, coverageDf = None, snpDf = None
     # clean up input data
     # check to make sure it's present first
     print('\n### cleaning input data ###')
-    if (svDf is not None) and (coverageDf is not None):
-        (cleanSv, badDeletions) = cleanStructuralVariants(svDf, coverageDf) # make sure deletions have < 10 coverage across most of their length
+    if (svDf is not None) and (lowThresh is not None):
+        cleanSv = cleanStructuralVariants(svDf, lowThresh) # make sure deletions have < 10 coverage across most of their length
     if (snpDf is not None):
         cleanSnp = cleanSnpMutations(snpDf)
     if (indelDf is not None):
         cleanI = cleanIndel(indelDf)
+    if (highThresh is not None):
+        (cleanHighThresh, avgCov) = cleanHighThreshold(highThresh)
 
     # match breakpoints
+    # previously I had been eliminating breakpoints after I matched them
+    # this created some problems where the order of searching was important
+    # so I changed the search function to always search with all of the breakpoints
+    # potentially this can give a problem where the same breakpoint is assigned to 
+    # multiple mutations
+    
+    # match transposon insertions 
+    print('\n### matching %s breakpoints to transposons ###' %(str(len(identifiedBp))))
+    (matchedIns, remainingBp2) = match_insertions(identifiedBp, 
+                                                  maxDist = 50, 
+                                                  seqList = 'Cth_transposons.fa', 
+                                                  filterByDist = True, 
+                                                  filterByEndDist = False)   
+    print('\n### matching %s breakpoints to insertions ###' %(str(len(identifiedBp))))
+    # match other insertions, i.e. merodiploid DNA
+    (matchedIns2, remainingBp3) = match_insertions(identifiedBp, 
+                                                   maxDist = 5000, 
+                                                   seqList = 'insertion_sequences.fa', 
+                                                   filterByDist = True, 
+                                                   filterByEndDist = True)   
+ 
     # check to make sure cleanSv and cleanBp are both present
     if (cleanSv is not None) and (cleanBp is not None):
         # match breakpoints to clean SV mutations, keep only SVs that have matched breakpoints, 
@@ -170,38 +208,60 @@ def combineMutations(inBpDf = None, svDf = None, coverageDf = None, snpDf = None
         # but we may still be interested in them
         leftoverCleanSv = cleanSv.loc[~cleanSv.index.isin(matchedSv.index), ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'Variant ratio', 'Name', 'Source']]
         leftoverCleanSv.rename(columns = {'Name':'Type', 'Variant ratio':'readFrac'}, inplace = True)
+        
+        # check for duplicates based on close distance
+        leftoverCleanSv = checkForDuplicate(matchedSv, leftoverCleanSv)
+        
            
-        # match transposon insertions 
-        print('\n### matching %s breakpoints to transposons ###' %(str(len(remainingBp1))))
-        (matchedIns, remainingBp2) = match_insertions(remainingBp1, 
-                                                      maxDist = 50, 
-                                                      seqList = 'Cth_transposons.fa', 
-                                                      filterByDist = True, 
-                                                      filterByEndDist = False)   
-        print('\n### matching %s breakpoints to insertions ###' %(str(len(remainingBp2))))
-        # match other insertions, i.e. merodiploid DNA
-        (matchedIns2, remainingBp3) = match_insertions(remainingBp2, 
-                                                       maxDist = 5000, 
-                                                       seqList = 'insertion_sequences.fa', 
-                                                       filterByDist = True, 
-                                                       filterByEndDist = True)   
-    
-    
-    
-    
-    # export list of unmatched breakpoints
-    remainingBp3.to_csv('unmatched_breakpoints.csv')
-    
-    # combine mutations from all dataframes
-    # need to check for duplicate mutations, strain LL1380 is good test case for this
-    result = pd.concat([cleanSnp, cleanI, matchedIns, matchedIns2, matchedSv, leftoverCleanSv])
 
+    # export list of unmatched breakpoints
+    # need to fix this part, since I got rid of the hierarchical searching
+    #remainingBp3.to_csv('unmatched_breakpoints.csv')
+    
+    # combine mutations from all dataframes (except low threshold)
+    # need to check for duplicate mutations, strain LL1380 is good test case for this
+    result = pd.concat([cleanSnp, cleanI, matchedIns, matchedIns2, matchedSv, leftoverCleanSv, cleanHighThresh])
+
+    # check cleanLowThresh for duplicates
+    if (lowThresh is not None):
+        cleanLowThresh = cleanLowThreshold(lowThresh)
+        cleanLowThresh = checkForDuplicate(result, cleanLowThresh)
+        result = pd.concat([result, cleanLowThresh])
      
     # match to known mutations and identify with unique mutation ID
     
     # export final dataframe as "all_cth_mutations"
     result.reset_index(inplace=True, drop=True)
     return result
+    
+
+def checkForDuplicate(inGood, inPossibleDupe):
+    """ 
+    given 2 dataframes, check for possible duplicate mutations
+    match chromosome, strain, sample, type
+    StartReg and EndReg of both duplications should be within 50 bp
+    return a dataframe with the non-duplicated rows
+    """
+    result = inPossibleDupe.copy().reset_index()
+    result = result.merge(inGood, how='inner', on=['Chromosome', 'Sample', 'Strain', 'Type'])
+    result['sDist'] = result['StartReg_x'] - result['StartReg_y']
+    result['eDist'] = result['EndReg_x'] - result['EndReg_y']
+    result['totDist'] = result['sDist'].abs() + result['eDist'].abs()
+    result.sort_values('totDist', inplace = True) # sort values so that next step takes the smallest result
+    result = result.groupby('index').first() # choose the rows with the shortest totDist
+    result[['Chromosome', 'StartReg_x', 'StartReg_y', 'totDist']]
+    
+    # if the total distance between the two start regions and the two end regions is less than 20
+    # the two regions probably have a substantial amount of overlap
+    dupRows = result['totDist'] < 20
+    
+    # get just the good rows
+    goodRows = result.loc[~dupRows, :]
+    
+    # return the non-duplicated rows from the original inPossibleDupe dataframe
+    result = inPossibleDupe.loc[inPossibleDupe.index.isin(goodRows.index), :]
+    return result
+    
     
 def cleanIndel(rawIndel):
     """ 
@@ -225,13 +285,14 @@ def cleanIndel(rawIndel):
     # fix chromosome spaces
     result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
     
-    result.rename(columns = {
-}, inplace=True)
+    #result.rename(columns = {
+     #       }, inplace=True)
     
     # make new Source column
     result['Source'] = 'indel_data'
     
     return result
+    
     
 def cleanBreakpoints(rawBP):
     """
@@ -264,7 +325,7 @@ def cleanBreakpoints(rawBP):
     print('done cleaning up rawBP')
     return cleanRawBP
     
-    
+        
 def splitRegion(inDf):
     """ 
     helper method for splitting a CLC "Region" field into "StartReg" and "EndReg" parts 
@@ -300,7 +361,67 @@ def splitRegion(inDf):
     return inDf
 
 
-def cleanStructuralVariants(rawSv, coverageDf):
+def cleanHighThreshold(highThresh):
+    """ 
+    clean up high threshold data.  This can be used to identify the presence of exogenous DNA such as repB and cat
+    also calculates the average read depth of the C. therm genome
+    """
+    highThresh = splitRegion(highThresh)
+    highThresh['Distance'] = highThresh['EndReg'] - highThresh['StartReg']
+    
+    # estimate average coverage of C. therm chromosome
+    # for regions that have 20x or higher coverage 
+    # (i.e. ignore deletion regions)
+    cthChrom = highThresh['Chromosome'] == 'Cth DSM 1313 genome'
+    cthThresh = highThresh.loc[cthChrom, :]
+    sumOfDistance = cthThresh['Distance'].sum()
+    avgCoverage = (cthThresh['Average value in window'] * (cthThresh['Distance'] / sumOfDistance)).sum()
+    
+    # calculate copy number for all regions
+    highThresh['CopyNumber'] = highThresh['Average value in window'] / avgCoverage
+    
+    notCthChrom = highThresh['Chromosome'] != 'Cth DSM 1313 genome'
+    goodDistance = highThresh['Distance'] > minLowCoverageLength
+    result = highThresh.loc[notCthChrom & goodDistance, ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'CopyNumber']]
+
+    # fix chromosome spaces
+    result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
+
+    result['Source'] = 'high_threshold'
+    
+    return (result, avgCoverage)
+
+    
+def cleanLowThreshold(lowThresh):
+    """ clean up low threshold data.  This can be used to identify deletions due to lack of sequence coverage """
+    # split start and end regions
+    lowThresh = splitRegion(lowThresh)
+    lowThresh['Distance'] = lowThresh['EndReg'] - lowThresh['StartReg']
+    
+    # distance needs to be long enough
+    goodDistance = lowThresh['Distance'] > minLowCoverageLength # constant value set at top of file
+    
+    # only search the C. therm chromosome
+    rightChrom = lowThresh['Chromosome'] == 'Cth DSM 1313 genome'
+    
+    # real deletion regions should have an average coverage of less than 0.1
+    lowReadCoverage = lowThresh['Average value in window'] < maxAverageReadCoverage # constant value set at top of file
+    
+    # since average coverage is 50-100x, 1-readCoverage is a reasonable approximation of the readFraction
+    lowThresh['readFrac'] = 1-(lowThresh['Average value in window'] / 50)
+    
+    result = lowThresh.loc[goodDistance & rightChrom & lowReadCoverage, ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'readFrac']]
+    result['Source'] = 'low_threshold'
+    
+    # fix chromosome spaces
+    result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
+    
+    result['Type'] = 'Deletion'
+    
+    return result
+
+    
+def cleanStructuralVariants(rawSv, lowThresh):
     """ clean up structural variants
     split Region into Start and End
     keep only mutations that are "deletion" or "tandem duplication" types
@@ -312,11 +433,11 @@ def cleanStructuralVariants(rawSv, coverageDf):
     
     # split Region into start and end
     rawSv = splitRegion(rawSv)
-    coverageDf = splitRegion(coverageDf)
+    lowThresh = splitRegion(lowThresh)
     
     # get rid of rows from the rawSv data with a split group number
     # split groups indicate complex sv results, and seem to be wrong, in general
-    rawSv = rawSv[rawSv['Split group'].isnull()]
+    rawSv = rawSv.loc[rawSv['Split group'].isnull(), :]
     
     # get rid of rows, except for the following types
     # where Name = Deletion, Evidence = Cross mapped breakpoints
@@ -325,7 +446,7 @@ def cleanStructuralVariants(rawSv, coverageDf):
     isDeletion = (rawSv['Name'] == 'Deletion') & (rawSv['Evidence'] == 'Cross mapped breakpoints')
     isInsertion = (rawSv['Name'] == 'Insertion') & (rawSv['Evidence'] == 'Tandem duplication')
     isReplacement = (rawSv['Name'] == 'Replacement')
-    rawSv = rawSv[isDeletion | isInsertion | isReplacement]
+    rawSv = rawSv.loc[isDeletion | isInsertion | isReplacement, :]
     
     # check the read coverage of deletions, for each strain
     strainList = rawSv['Strain'].unique()
@@ -336,7 +457,7 @@ def cleanStructuralVariants(rawSv, coverageDf):
     for strain in strainList:
         #print('************ working on strain %s ... **************************'%(strain))
         tempStrainSv = rawSv.loc[rawSv['Strain'] == strain, :]
-        tempStrainCov = coverageDf.loc[coverageDf['Strain'] == strain, :]
+        tempStrainCov = lowThresh.loc[lowThresh['Strain'] == strain, :]
         chromosomeList = tempStrainSv['Chromosome'].unique()
         
         # loop through each chromosome within each strain
@@ -371,23 +492,29 @@ def cleanStructuralVariants(rawSv, coverageDf):
             badDeletionList.extend(bestMatchDfBad.index.tolist())
            
     # make new dataframe with correct deletions
-    correctDeletions = rawSv.loc[correctDeletionList, :]
-    badDeletions = rawSv.loc[badDeletionList, :]
+    correctDeletions = rawSv.loc[correctDeletionList, :].copy()
+    correctDeletions['Source'] = 'sv_data low_coverage'
+    
+    badDeletions = rawSv.loc[badDeletionList, :].copy()
+    badDeletions['Source'] = 'sv_data'
     
     # make dataframe with insertions
-    insertionDf = rawSv.loc[isInsertion, :]
+    insertionDf = rawSv.loc[isInsertion, :].copy()
+    insertionDf['Source'] = 'sv_data'
     
-    result = pd.concat([correctDeletions, insertionDf])
+    # originally I was planning to eliminate the 'badDeletions' because 
+    # some of them show up due to transposon inversions
+    # however this signature also shows up in strains where adhE was deleted and then re-inserted
+    # i.e. LL1153
+    result = pd.concat([correctDeletions, badDeletions, insertionDf])
     
     # after cleaning, reset the row numbering to be consecutive
     result.reset_index(drop = True, inplace = True) 
-    # make new Source column
-    result['Source'] = 'sv_data'
     
     # fix chromosome spaces
     result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
     
-    return (result, badDeletions)
+    return result
 
 
 def cleanSnpMutations(rawSnp):
@@ -577,7 +704,7 @@ def match_bp_to_sv(inSv, inBpDf):
         if row['Type'] == 'Insertion' and row['Evidence'] == 'Tandem duplication':
             result.set_value(index, 'Type', 'Tandem duplication')
     # add column Source
-    result['Source'] = 'match_bp_to_sv'
+    result['Source'] = result['Source'] + ' match_bp'
     
     # fix chromosome spaces
     result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
@@ -595,6 +722,7 @@ def match_bp_to_sv(inSv, inBpDf):
     # find the original breakpoints whose breakpoint IDs are not in the matchedBpList
     remainingBp = inBpDf.loc[~matchedBooleanSeries, :]   
     return (result, remainingBp)
+
 
 def fixChromosomeSpaces(inStr):
     """ replace spaces with underscores in 'Chromosome' field 
@@ -635,7 +763,8 @@ Uses Anaconda3 as the python interpreter
 
 def get_clc_data_from_txt(filePath = clcDataFilePath):
     """
-    given a starting directory with outputs from a CLC SFRE workflow:
+    Note: needs access to master strain table for relationship between strainID and sampleID
+    Given a starting directory with outputs from a CLC SFRE workflow:
      - parse file names to get strain name and mutation type (SV, BP, SNP, etc.)
      - make a table of the files
      - check for duplicate rows, if found use highest numbered version
@@ -676,8 +805,15 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
             #print(result)
             strainID = result[0][0]
             fileType = typeDict[result[0][2]]
+            
+            # add low10 or high20 identifier to the end of Thr
+            # low10 is the default option
             if fileType == 'Thr': # get low10 or high20 identifier
-                fileType  = fileType + result[0][3]
+                if result[0][3] != '':
+                    fileType  = fileType + result[0][3]
+                else:
+                    fileType  = fileType + '_low10'
+            
             if result[0][5] is '': # the file doesn't have a value in the fileVers location
                 fileVers = 0
             else:
@@ -687,8 +823,9 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
             fileList.append(row)
         
     clcFilesDf = pd.DataFrame(fileList, columns = ['Filename', 'StrainID', 'Type', 'Version'])
+    
     ### for testing
-    clcFilesDf.to_excel('clcFilesDf.xlsx')
+    #clcFilesDf.to_excel('clcFilesDf.xlsx')
     
     # for each strain and type, make sure we only select the row with the highest version number
     maxVersionIndex = clcFilesDf.groupby(['StrainID', 'Type'])['Version'].transform(max) == clcFilesDf['Version']
