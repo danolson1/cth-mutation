@@ -291,6 +291,9 @@ def cleanIndel(rawIndel):
     # make new Source column
     result['Source'] = 'indel_data'
     
+    # rename 'Variant ratio'
+    result.rename(columns = {'Variant ratio':'readFrac'}, inplace=True)
+    
     return result
     
     

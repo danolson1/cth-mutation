@@ -35,6 +35,13 @@ from Bio.SeqRecord import SeqRecord
 #uniqueMutDf = pd.read_csv('unique_cth_mutations_10242016.csv')
 max_upstream_dist = 500 # maximum upstream distance for a mutation to affect a gene
 
+# from match_alleleTbl, determines cutoff for matching start and end regions
+# Note 12-7-2016, this has been replaced by using isSameRegion for matching and should be removed at some point
+maxMismatchDistance = 6 
+
+# for isSameRegion function
+minOverlapThresh = 0.98 # mutations must be 98% overlapped to be considered identical
+
 # get NCBI accession number for chromosomes based on CLC name
 # for match_alleleTbl function
 chromosomeDict = {'Cth_DSM_1313_genome':'NC_017304.1'}
@@ -42,12 +49,13 @@ chromosomeDict = {'Cth_DSM_1313_genome':'NC_017304.1'}
 #--------------------------------------------------------------------------------------
 # annotate dataframe based on CDS
 #--------------------------------------------------------------------------------------
-def annotate_from_gb(inMutDf, genBankFileName, annotateBest = True):
+def annotate_from_gb(inMutDf, genBankFileName, annotateBest = True, alleleTblFilename = None):
     """
     given a dataframe with mutations and a genbank filename, determine which 
-    genes are affected by a given mutation.  If annotateBest is True, for each
-    mutation, only choose the best annotation.  If annotateBest is False, for each
-    mutation, choose all CDSs that might interact
+    genes are affected by a given mutation.  
+    If annotateBest is True, for each mutation, only choose the best annotation.  
+    If annotateBest is False, for each mutation, choose all CDSs that might interact
+    When annotateAllele is True, try to match unique mutations to the Allele.xlsx data file
     """
     
     # first, make the annotation table
@@ -55,67 +63,78 @@ def annotate_from_gb(inMutDf, genBankFileName, annotateBest = True):
     
     # then, make a list of unique mutations (to avoid annotating things multiple times)
     uniqueMutDf = find_unique_mutations(inMutDf)
+    # and map mutation IDs back to the list of all mutations
+    inMutDf = map_unique_mutid_to_mut(uniqueMutDf, inMutDf)
     
-    # then use it to annotate the list of mutations
-    annoAll = annotate_all_CDS(uniqueMutDf, cdsDf)
+    # then annotate the unique list of mutations with CDS overlaps
+    # each unique mutID may have several annotations
+    uniqueAllAnno = annotate_all_CDS(uniqueMutDf, cdsDf)
 
     # choose the one best annotation for each mutation
     if annotateBest: 
-        result = annotate_best_CDS(uniqueMutDf, annoAll)
-    # OR annotate each mutation with all of the potential genes that could be affected
-    else: 
-        result = annoAll
-    
-    # map annotations back to original mutations    
-    result = map_anno_to_mut(result, inMutDf)
-    
-    # keep only the specified columns
-    if annotateBest:
+        uniqueAnno = annotate_best_CDS(uniqueMutDf, uniqueAllAnno) 
+        """# clean up columns
         # note, the Locus description column can't be added
         # because there may be more than one locus per mutation
-        result = result[['mutID',
-                         'Strain',
-                         'Sample',
-                         'Chromosome',
-                         'Source',
-                         'StartReg',
-                         'EndReg',
-                         'Description',
-                         'Type',
-                        #'lBpId',
-                        #'rBpId',
-                        'Annotation name',
-                        'readFrac'
-                        ]]
-    else:
-        result = result[['mutID',
-                         'Strain',
-                         'Sample',
-                         'Chromosome',
-                         'Source',
-                         'StartReg',
-                         'EndReg',
-                         'Description',
-                         'Type',
-                         'Label',
-                         'inCDS',
-                         'Locus description',
-                         'upstreamDist'
-                         'readFrac'                        
-                        #'lBpId',
-                        #'rBpId',
-                        #'Locus start',
-                        ]]
+        uniqueAnno = uniqueAnno[['mutID', # allMut
+                                 'Strain', # allMut
+                                 'Sample', # allMut
+                                 'Chromosome', # allMut
+                                 'Source', # allMut
+                                 'StartReg', # allMut
+                                 'EndReg', # allMut
+                                 'Description', # allMut
+                                 'Type', # allMut
+                                #'lBpId',# allMut
+                                #'rBpId', # allMut
+                                 'Annotation name',
+                                 'readFrac' # allMut
+                                ]]
+        """
+    # OR annotate each mutation with all of the potential genes that could be affected
+    else: 
+        uniqueAnno = uniqueAllAnno
+        """
+        uniqueAnno = uniqueAnno[['mutID', # allMut
+                                 'Strain',# allMut
+                                 'Sample',# allMut
+                                 'Chromosome',# allMut
+                                 'Source',# allMut
+                                 'StartReg',# allMut
+                                 'EndReg',# allMut
+                                 'Description',# allMut
+                                 'Type',# allMut
+                                 'Label',
+                                 'inCDS',
+                                 'Locus description',
+                                 'upstreamDist'
+                                 'readFrac'                        
+                                #'lBpId',
+                                #'rBpId',
+                                #'Locus start',
+                               ]]
+        """
     
+    # map annotations back to original mutations based on the mutation ID    
+    inMutAnno = inMutDf.merge(uniqueAnno, how = 'left', on='mutID', suffixes = ('', '_y')) # use _y flag to keep track of duplicate columns
+    inMutAnno = inMutAnno.loc[:, ~inMutAnno.columns.str.contains('_y')] # get rid of columns with _y flag
+    
+    # match Alleles, if the Allele.xlsx location has been specified
+    if alleleTblFilename is not None:
+        uniqueMutAllele = match_alleleTbl(uniqueMutDf, alleleTblFilename)
+        # match AlleleID and AlleleName back to the original mutants
+        inMutAnno = inMutAnno.merge(uniqueMutAllele, how = 'left', on='mutID', suffixes = ('', '_y')) # use _y flag to keep track of duplicate columns
+        inMutAnno = inMutAnno.loc[:, ~inMutAnno.columns.str.contains('_y')] # get rid of columns with _y flag
+    
+    result = inMutAnno
+
     return result
 
 
 def match_alleleTbl(uniqueMutDf, alleleTblFilename = 'Allele.xlsx'):
     """ 
     match mutations (unique or all) against known mutations from the allele table 
-    return the new dataframe with matched mutations
-    also return a dataframe of unmatched mutations that are likely to be 
-    targeted modifications
+    return only the important columns, mutID, AlleleID and AlleleName
     """
     alleleTbl = pd.read_excel(alleleTblFilename)
     
@@ -130,14 +149,49 @@ def match_alleleTbl(uniqueMutDf, alleleTblFilename = 'Allele.xlsx'):
     result = uniqueMutDf.merge(alleleSlice, how='left', left_on = ['Chromosome', 'Type', 'Description'], 
                right_on = ['ChromosomeID', 'Type', 'Description'])
                
+    # use isSameRegion to find close matches for start and end regions 
+    result['isSameRegion'] = result.apply(lambda x: isSameRegion(x['StartReg'], x['EndReg'], 
+                                                                 x['Start'], x['End']), axis=1)
+    result = result.loc[result['isSameRegion'], :]
+    # drop extra columns added to calculate same region
+    result.drop(['Start', 'End', 'isSameRegion'], axis=1, inplace = True)    
+    
+    
+    
+    """
+        # get rid of other columns from uniqueMut, except the ones we care about
+    uniqueMut = uniqueMut.loc[:,['mutID', 'Chromosome', 'Description', 'Type', 'StartReg', 'EndReg'] ]
+    
+    # if inMutDf already has a column called 'mutID' we need to get rid of it
+    if 'mutID' in inMutDf.columns:
+        inMutDf.drop('mutID', axis=1, inplace=True)
+    
+    # merge based on the columns that should match exactly
+    result = inMutDf.merge(uniqueMut, how='left', on=['Chromosome', 'Type', 'Description'])
+    
+
+    
+    # rename columns as needed
+    result.rename(columns = {'StartReg_x' : 'StartReg',
+                             'EndReg_x' : 'EndReg'}, 
+                  inplace = True)
+    
+    # move the column to head of list using index, pop and insert
+    cols = list(result)
+    cols.insert(0, cols.pop(cols.index('mutID')))
+    result = result.loc[:, cols]
+               
     result['sDist'] = result['StartReg'] - result['Start']
     result['eDist'] = result['EndReg'] - result['End']
     result['totDist'] = result['sDist'].abs() + result['eDist'].abs()
     
-    closeMatch = result['totDist'] < 6 # allow a total difference of 6 bp for matches
+    closeMatch = result['totDist'] < maxMismatchDistance # allow a total difference of 6 bp for matches
     result = result.loc[closeMatch, :]
+    """
     
     # make a table of alleles that weren't matched
+    # this should go it its own function
+    """
     umdf = uniqueMutDf.copy()
     umdf = umdf.merge(result.loc[:, ['AlleleID', 'mutID']], on='mutID', how='left')
     nullAlleleID = umdf['AlleleID'].isnull()
@@ -152,10 +206,65 @@ def match_alleleTbl(uniqueMutDf, alleleTblFilename = 'Allele.xlsx'):
                                           'StartReg', 'EndReg', 'Description', 
                                           'Type', 'Annotation name']]
     uniqueNotMatched.drop_duplicates(inplace = True)
+    """
         
-    return (result, uniqueNotMatched)
+    return result
 
-     
+
+def map_unique_mutid_to_mut(uniqueMut, inMutDf):
+    """ 
+    given a set of unique mutation IDs (uniqueMut),
+    map them on to a set of mutations (inMut)
+    based on exact match of Chromosome, Type and Description
+    and close match to StartReg and EndReg
+    
+    uniqueMut columns:
+      "Chromosome"
+      "Description"
+      "Type"
+      "StartReg"
+      "EndReg"
+      "mutID"
+      
+    inMutDf columns:
+      "Chromosome"
+      "Description"
+      "Type"
+      "StartReg"
+      "EndReg"
+      "mutID"
+      and maybe other columns too
+    """
+    
+    # get rid of other columns from uniqueMut, except the ones we care about
+    uniqueMut = uniqueMut.loc[:,['mutID', 'Chromosome', 'Description', 'Type', 'StartReg', 'EndReg'] ]
+    
+    # if inMutDf already has a column called 'mutID' we need to get rid of it
+    if 'mutID' in inMutDf.columns:
+        inMutDf.drop('mutID', axis=1, inplace=True)
+    
+    # merge based on the columns that should match exactly
+    result = inMutDf.merge(uniqueMut, how='left', on=['Chromosome', 'Type', 'Description'])
+    
+    # use isSameRegion to find close matches for start and end regions 
+    result['isSameRegion'] = result.apply(lambda x: isSameRegion(x['StartReg_x'], x['EndReg_x'], 
+                                                                 x['StartReg_y'], x['EndReg_y']), axis=1)
+    result = result.loc[result['isSameRegion'], :]
+    # drop extra columns added to calculate same region
+    result.drop(['StartReg_y', 'EndReg_y', 'isSameRegion'], axis=1, inplace = True)
+    
+    # rename columns as needed
+    result.rename(columns = {'StartReg_x' : 'StartReg',
+                             'EndReg_x' : 'EndReg'}, 
+                  inplace = True)
+    
+    # move the column to head of list using index, pop and insert
+    cols = list(result)
+    cols.insert(0, cols.pop(cols.index('mutID')))
+    result = result.loc[:, cols]
+
+    return result
+    
 
 #--------------------------------------------------------------------------------------
 # make dataframe with CDS annotations
@@ -222,6 +331,32 @@ def make_annotation_table(genbankFileName):
     return cdsDf
 
 
+def isSameRegion(start_x, end_x, start_y,  end_y):
+    """
+    determine whether 2 mutations are actually identical,
+    even if they have slightly different start and end coordinates
+    usually this is due to differences in read mapping
+    sometimes it can be caused by the presence of two adjacent mutations
+    i.e. a SNP and a breakpoint
+    """
+    isSame = False # boolean flag to hold the output, whether the two mutations are the same
+    
+    totDiff = abs(start_x - start_y) + abs(end_x - end_y) # total difference between start and end regions
+    if totDiff == 0: # if the region is identical, no further analysis needed
+        isSame = True
+        return isSame 
+    else:  # otherwise, check to see how big the difference is 
+        len_x = (end_x - start_x)
+        len_y = (end_y - start_y)
+        maxLen = max(len_x, len_y)
+        if maxLen > 0:
+            minOverlap = 1 - (float(totDiff) / maxLen)
+            if minOverlap > minOverlapThresh:
+                isSame = True
+    
+    return isSame
+
+
 def find_unique_mutations(inMut):
     """ given a list of mutations from several strains, find the ones that are unique """
     # get a list of the unique mutations from the list of all mutations
@@ -232,20 +367,44 @@ def find_unique_mutations(inMut):
     result = inMut.loc[:, ('Chromosome', 'StartReg', 'EndReg', 'Type', 'Description')]
     result.drop_duplicates(inplace = True)
     
-    """
-    12-5-2016, not needed now that 'Source' is not included
-    # check to see if there are multiple rows that differ only by source
-    dupRows = result[result.duplicated(['Chromosome', 'StartReg', 'EndReg', 'Type', 'Description'])]
-    if len(dupRows) > 0:
-        print("find_unique_mutations ERROR: same mutation from multiple sources identified")
-        print(dupRows)
-    """
-    
     # clean up result
     result.sort_values('StartReg', inplace=True)
     result.reset_index(drop = True, inplace = True) # get rid of original index
     result.reset_index(inplace = True) # move new index to a column called 'index'
     result.rename(columns={'index':'mutID'}, inplace=True)
+    
+    # check for duplicate mutID, where the StartReg and EndReg regions are close but not identical
+    # make list of duplicated mutations
+    checkDup = result.merge(result, on=['Chromosome', 'Type', 'Description'])
+    checkDup['isSameRegion'] = checkDup.apply(lambda x: isSameRegion(x['StartReg_x'], x['EndReg_x'], x['StartReg_y'], x['EndReg_y']), axis=1)
+    notIdentical = checkDup['mutID_x'] != checkDup['mutID_y']
+    sameRegion = checkDup['isSameRegion']
+    checkDup = checkDup.loc[notIdentical & sameRegion, :]
+    dupMutIdx = checkDup['mutID_x'].unique().tolist() # list of duplicated mutation indices
+    
+    # eliminate those rows
+    dupIndList = [] # list of duplicate indices to remove
+    df = result.loc[result.index.isin(dupMutIdx), :] # make a dataframe with just the set of potential duplicate rows
+    df.set_index('mutID')
+    
+    for i in range(len(dupMutIdx)):
+        test = dupMutIdx[i]
+        #print('checking mutation ', test)
+        for j in range(len(dupMutIdx)-(i+1)):
+            candidate = dupMutIdx[j+i+1]
+            #print('\t against mutation ', candidate)
+            CTDmatch = df.loc[test, ['Chromosome', 'Type', 'Description']].equals(df.loc[candidate, ['Chromosome', 'Type', 'Description']])
+            regionMatch = isSameRegion(df.loc[test,'StartReg'], df.loc[test,'EndReg'], df.loc[candidate,'StartReg'], df.loc[candidate,'EndReg'] )
+            
+            if (CTDmatch and regionMatch):
+                #print('\t\t mutation matched')
+                dupIndList.append(candidate)
+       
+    #print(set(dupIndList))
+    result = result.loc[~result['mutID'].isin(dupIndList), :] # list of mutations with no duplicates
+    
+    
+    
     return result
 
 #--------------------------------------------------------------------------------------
@@ -264,7 +423,6 @@ def annotate_all_CDS(inUniqueMutDf, inCdsDf):
     ## create a table with all pairs of mutation and CDS
     # first, add temporary columns to force outer join to create all combinations of rows from each table
     uniqueMutDf['joinIndex'] = 1
-    #uniqueMutDf['mutID'] = uniqueMutDf.index.values #already present in CSV file
     cdsDf['joinIndex'] = 1
     mutCdsJoinDf = pd.merge(uniqueMutDf, cdsDf, on = ['joinIndex', 'Chromosome'] , how='inner')
     mutCdsJoinDf.drop('joinIndex', axis=1, inplace=True) # get rid of temporary columns
@@ -325,8 +483,11 @@ def annotate_all_CDS(inUniqueMutDf, inCdsDf):
                              'Description_y': 'Locus description',
                              'Start': 'Locus start'}, inplace=True)
     return result
+
     
 
+
+### NEED TO DELETE THIS FUNCTION, NO LONGER USED ###
 def map_anno_to_mut(annoUniqueMut, inMutDf):
     """ 
     given a set of annotated mutations, map those annotations back
