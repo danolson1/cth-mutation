@@ -68,7 +68,9 @@ from Bio.SeqRecord import SeqRecord
 # maximim distance between breakpoint associated with a deletion 
 # and where region of <10x coverage starts
 # originally I had this set to 10, but in AG1155, I needed to increase it to 12
-maxDeletionDistanceError = 20
+maxDeletionDistanceError = 20 # replaced by isSameRegion function, need to delete 12-9-2016
+# for isSameRegion function
+minOverlapThresh = 0.98 # mutations must be 98% overlapped to be considered identical
 
 maxHitEndDistance = 20 # maximum distance between BLAST hit and end of sequence, important for insertions
  
@@ -97,7 +99,7 @@ blastSubjectFiles = ['insertion_sequences.fa', # pyk(Tsc), pta merodiploid and S
 # constants for identifying real mutations from threshold data
 # see cleanLowThreshold function
 minLowCoverageLength = 50 # ignore low coverage regions shorter than this
-maxAverageReadCoverage = 1 # ignore regions with maximum coverage higher than this
+maxAverageReadCoverage = 2 # ignore regions with maximum coverage higher than this
 
 ############################################################
 
@@ -172,7 +174,7 @@ def combineMutations(inBpDf = None, svDf = None, lowThresh = None, highThresh = 
     if (indelDf is not None):
         cleanI = cleanIndel(indelDf)
     if (highThresh is not None):
-        (cleanHighThresh, avgCov) = cleanHighThreshold(highThresh)
+        (cleanHighThresh, res, avgCov) = cleanHighThreshold(highThresh) # ignore res and avgCov for now
 
     # match breakpoints
     # previously I had been eliminating breakpoints after I matched them
@@ -305,6 +307,10 @@ def cleanBreakpoints(rawBP):
         minNumReads: don't bother doing a blast search if there are fewer than this number of reads
                    initially I was using 10, but came across a case where an important BP only
                    had 9 reads.
+    calculate the readFrac (proxy for zygosity).  
+    CLC makes a similar calculation called "Fraction non-perfectly mapped"
+    but this ignores the broken read pairs, which gives an artifically low number in a many cases,
+    since broken read pairs are common around insertions and deletions
     """
     print('cleaning up identifiedBpDf...')
     
@@ -314,6 +320,9 @@ def cleanBreakpoints(rawBP):
     
     # make sure BP sequence (in 'Unaligned' column) only contains the letters A, G, C and T
     rawBP['Unaligned'] = rawBP['Unaligned'].replace({'[^AGCT]':''}, regex=True)
+    
+    # calculate the readFrac
+    rawBP['readFrac'] = (rawBP['Not perfect mapped'] + rawBP['Ignored mapped'])/(rawBP['Not perfect mapped'] + rawBP['Ignored mapped'] + rawBP['Perfect mapped'])
     
     # build boolean filters
     seqNotNull = pd.notnull(rawBP['Unaligned'])  # check to make sure the 'Unaligned' value is not null
@@ -367,80 +376,154 @@ def splitRegion(inDf):
 def cleanHighThreshold(highThresh):
     """ 
     clean up high threshold data.  This can be used to identify the presence of exogenous DNA such as repB and cat
-    also calculates the average read depth of the C. therm genome
+    also calculates the average read depth of the C. therm genome per strain
     """
     highThresh = splitRegion(highThresh)
     highThresh['Distance'] = highThresh['EndReg'] - highThresh['StartReg']
+    
+    highThresh.rename(columns = {'Average value in window': 'avg cov'}, inplace = True)
     
     # estimate average coverage of C. therm chromosome
     # for regions that have 20x or higher coverage 
     # (i.e. ignore deletion regions)
     cthChrom = highThresh['Chromosome'] == 'Cth DSM 1313 genome'
-    cthThresh = highThresh.loc[cthChrom, :]
-    sumOfDistance = cthThresh['Distance'].sum()
-    avgCoverage = (cthThresh['Average value in window'] * (cthThresh['Distance'] / sumOfDistance)).sum()
+    cthThresh = highThresh.loc[cthChrom, :] # dataframe with only chromosomal coverage rows
+    
+    # group by strain to calculate chromosomal coverage
+    distByStrain = cthThresh[['Strain', 'Distance']].groupby('Strain').sum()
+    distByStrain.rename(columns = {'Distance': 'Total Strain Distance'}, inplace = True)
+    cthThresh2 = cthThresh.merge(distByStrain, how='left', left_on='Strain', right_index = True)
+    cthThresh2['distFrac'] = cthThresh2['Distance'] / cthThresh2['Total Strain Distance']
+    cthThresh2['covFrac'] = cthThresh2['avg cov'] * cthThresh2['distFrac']
+    
+    covByStrain = cthThresh2[['Strain', 'covFrac']].groupby('Strain').sum()
+    covByStrain.rename(columns = {'covFrac' : 'avg coverage by strain'}, inplace = True)
+    
+    # map chromosomal coverage back to high threshold
+    highThresh = highThresh.merge(covByStrain, how='left', left_on='Strain', right_index = True)
+    
+    #sumOfDistance = cthThresh['Distance'].sum()
+    #avgCoverage = (cthThresh['Average value in window'] * (cthThresh['Distance'] / sumOfDistance)).sum()
     
     # calculate copy number for all regions
-    highThresh['CopyNumber'] = highThresh['Average value in window'] / avgCoverage
+    highThresh['CopyNumber'] = highThresh['avg cov'] / highThresh['avg coverage by strain']
     
     notCthChrom = highThresh['Chromosome'] != 'Cth DSM 1313 genome'
     goodDistance = highThresh['Distance'] > minLowCoverageLength
-    result = highThresh.loc[notCthChrom & goodDistance, ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'CopyNumber']]
-
+    result = highThresh.loc[goodDistance, ['Strain', 'Sample', 'Chromosome', 
+                                                         'StartReg', 'EndReg', 'avg cov', 
+                                                         'avg coverage by strain', 'CopyNumber', ]]
+    
     # fix chromosome spaces
     result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
-
+    
     result['Source'] = 'high_threshold'
     
-    return (result, avgCoverage)
+    # for the mutation list, we don't need the regions of the C. therm chromosome where coverage is hy
+    # but we do need this for calculating the read fraction of the low threshold data
+    resultNoCthChrom = result.loc[notCthChrom, :]
+    
+    return (resultNoCthChrom, result, covByStrain)
 
     
-def cleanLowThreshold(lowThresh):
+def cleanLowThreshold(lowThresh, cleanHighThr):
     """ clean up low threshold data.  This can be used to identify deletions due to lack of sequence coverage """
+    
+    highThresh = cleanHighThr.copy() # assume that the high threshold data has already been cleaned up, use the returned dataframe "res"
+    
     # split start and end regions
     lowThresh = splitRegion(lowThresh)
     lowThresh['Distance'] = lowThresh['EndReg'] - lowThresh['StartReg']
     
-    # distance needs to be long enough
+    # fix chromosome spaces
+    lowThresh['Chromosome'] = lowThresh['Chromosome'].apply(fixChromosomeSpaces)
+    
+    # rename columns
+    lowThresh.rename(columns = {'Average value in window': 'avg cov'}, inplace = True)
+    
+    # short regions of low coverage can be ignored
+    # because they're usually the result of mapping errors
     goodDistance = lowThresh['Distance'] > minLowCoverageLength # constant value set at top of file
     
     # only search the C. therm chromosome
-    rightChrom = lowThresh['Chromosome'] == 'Cth DSM 1313 genome'
+    rightChrom = lowThresh['Chromosome'] == 'Cth_DSM_1313_genome'
     
     # real deletion regions should have an average coverage of less than 0.1
-    lowReadCoverage = lowThresh['Average value in window'] < maxAverageReadCoverage # constant value set at top of file
+    # I set this value to 1 to avoid getting rid of regions just over the 0.1 threshold
+    lowReadCoverage = lowThresh['avg cov'] < maxAverageReadCoverage # constant value set at top of file
     
     # since average coverage is 50-100x, 1-readCoverage is a reasonable approximation of the readFraction
-    lowThresh['readFrac'] = 1-(lowThresh['Average value in window'] / 50)
+    #lowThresh['readFrac'] = 1-(lowThresh['Average value in window'] / 50)
+    # calculate read fraction
+    # determine the average coverage just upstream and just downstream of the mutation from the high threshold data
+    lowTStart = lowThresh.loc[:, ['Strain', 'Sample', 'Chromosome', 'StartReg']]
+    highTEnd = highThresh.loc[:, ['Strain', 'Sample', 'Chromosome', 'EndReg', 'avg cov']]
+    matchUpstream = pd.merge(lowTStart, highTEnd, how='inner', on=['Strain', 'Sample', 'Chromosome'])
+    matchUpstream['startDist'] = matchUpstream['StartReg'] - matchUpstream['EndReg']
+    matchUpstream = matchUpstream.loc[matchUpstream['startDist'] >= 0, :] # eliminate negative distance values
+    groups = matchUpstream.groupby(['Strain', 'Sample', 'Chromosome', 'StartReg'])
+    upCoverage = matchUpstream.loc[groups['startDist'].idxmin(), :]
+    upCoverage.rename(columns={'avg cov' : 'up cov',
+                               'EndReg'  : 'EndReg_up'}, inplace = True)
     
-    result = lowThresh.loc[goodDistance & rightChrom & lowReadCoverage, ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'readFrac']]
+    lowTEnd = lowThresh.loc[:, ['Strain', 'Sample', 'Chromosome', 'EndReg']]
+    highTStart = highThresh.loc[:, ['Strain', 'Sample', 'Chromosome', 'StartReg', 'avg cov']]
+    matchDownstream = pd.merge(lowTEnd, highTStart, how='inner', on=['Strain', 'Sample', 'Chromosome'])
+    matchDownstream['endDist'] = matchDownstream['StartReg'] - matchDownstream['EndReg']
+    matchDownstream = matchDownstream.loc[matchDownstream['endDist'] >= 0, :] # eliminate negative distance values
+    groups = matchDownstream.groupby(['Strain', 'Sample', 'Chromosome', 'EndReg'])
+    dnCoverage = matchDownstream.loc[groups['endDist'].idxmin(), :]
+    dnCoverage.rename(columns={'avg cov' : 'dn cov',
+                               'StartReg'  : 'StartReg_dn'}, inplace = True)
+    
+    # add information about upstream and downstream coverage
+    lowThresh = lowThresh.merge(upCoverage, how='left', on=['Strain', 'Sample', 'Chromosome', 'StartReg'])
+    lowThresh = lowThresh.merge(dnCoverage, how='left', on=['Strain', 'Sample', 'Chromosome', 'EndReg'])
+    
+    # calculate readFrac
+    lowThresh['readFrac'] = 1 - (lowThresh['avg cov'] / ((lowThresh['up cov'] + lowThresh['dn cov'])/2))
+    
+    # select columns
+    result = lowThresh.loc[goodDistance & rightChrom & lowReadCoverage, ['Strain', 'Sample', 
+                                                                         'Chromosome', 'StartReg', 
+                                                                         'EndReg', 
+                                                                         'readFrac'
+                                                                         #'avg cov', 'up cov', 'dn cov',
+                                                                         #'startDist', 'endDist'
+                                                                        ]]
     result['Source'] = 'low_threshold'
-    
-    # fix chromosome spaces
-    result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
-    
     result['Type'] = 'Deletion'
     
     return result
 
     
-def cleanStructuralVariants(rawSv, lowThresh):
-    """ clean up structural variants
+def cleanStructuralVariants(rawSv, cleanLowThresh):
+    """ 
+    clean up structural variants
     split Region into Start and End
     keep only mutations that are "deletion" or "tandem duplication" types
     make sure that deletions have zero coverage in the deletion region 
-
+    cleanLowThresh is the low threshold dataframe, assume it has already been cleaned
+    
     #### NOTE NEED TO TEST WITH TANDEM DUPLICATION ####
     """
     print('cleaning structural variations...')
     
     # split Region into start and end
+    # we don't need to do this for cleanLowThresh, since we're assuming this already
+    # happened when it was 'cleaned'
     rawSv = splitRegion(rawSv)
-    lowThresh = splitRegion(lowThresh)
+    
+    # fix chromosome spaces
+    rawSv['Chromosome'] = rawSv['Chromosome'].apply(fixChromosomeSpaces)
+    
+    # rename columns
+    rawSv.rename(columns={'Variant ratio': 'readFrac'}, inplace = True)
     
     # get rid of rows from the rawSv data with a split group number
     # split groups indicate complex sv results, and seem to be wrong, in general
     rawSv = rawSv.loc[rawSv['Split group'].isnull(), :]
+    rawSv.reset_index(inplace = True) # keep index for later re-merging of results
     
     # get rid of rows, except for the following types
     # where Name = Deletion, Evidence = Cross mapped breakpoints
@@ -451,71 +534,48 @@ def cleanStructuralVariants(rawSv, lowThresh):
     isReplacement = (rawSv['Name'] == 'Replacement')
     rawSv = rawSv.loc[isDeletion | isInsertion | isReplacement, :]
     
-    # check the read coverage of deletions, for each strain
-    strainList = rawSv['Strain'].unique()
-    correctDeletionList = []
-    badDeletionList = []
     
-    # loop through strains
-    for strain in strainList:
-        #print('************ working on strain %s ... **************************'%(strain))
-        tempStrainSv = rawSv.loc[rawSv['Strain'] == strain, :]
-        tempStrainCov = lowThresh.loc[lowThresh['Strain'] == strain, :]
-        chromosomeList = tempStrainSv['Chromosome'].unique()
-        
-        # loop through each chromosome within each strain
-        for chrom in chromosomeList:
-            #print('    working on chromosome %s ...'%(chrom))
-            tempSv = tempStrainSv.loc[tempStrainSv['Chromosome'] == chrom, :]
-            tempCov = tempStrainCov.loc[tempStrainCov['Chromosome'] == chrom, :]
-        
-            # limit dataframe to SV mutations that are deletions
-            tempSvDel = tempSv.loc[isDeletion, :]
-            
-            # make a dataframe with the best match for each SV row
-            tsd = tempSvDel.loc[:,['Strain', 'StartReg', 'EndReg']].reset_index() # temporary SV dataframe
-            tc = tempCov.loc[:,['Strain', 'StartReg', 'EndReg']].reset_index() # temporary coverage dataframe
-            t2 = tsd.merge(tc, on='Strain', suffixes=('_SV', '_cov')) # match all SV rows to all coverage rows
-            t2['startDiff'] = t2['StartReg_cov'] - t2['StartReg_SV'] # distance between start of SV and start of low coverage region
-            t2['endDiff'] = t2['EndReg_SV'] - t2['EndReg_cov'] # distance between end of low coverage region and end of SV
-            t2['totDiff'] = t2['startDiff'].abs() + t2['endDiff'].abs() # total for sorting
-            bestMatchDf = t2.sort_values('totDiff', ascending = True).groupby('index_SV').first()
-            
-            # split this dataframe based on whether it meets or does not meet the maxDeletionDistanceError threshold
-            # note that we only need a one-sided test
-            # it's fine if the low coverage region extends beyond the SV region (i.e. when startDiff or endDiff is negative)
-            startIsGood = bestMatchDf['startDiff'] <= maxDeletionDistanceError
-            endIsGood = bestMatchDf['endDiff'] <= maxDeletionDistanceError
-            
-            bestMatchDfGood = bestMatchDf.loc[(startIsGood & endIsGood), :]
-            bestMatchDfBad = bestMatchDf.loc[~(startIsGood & endIsGood), :]
-            
-            # add the index values to the correct list
-            correctDeletionList.extend(bestMatchDfGood.index.tolist())
-            badDeletionList.extend(bestMatchDfBad.index.tolist())
-           
-    # make new dataframe with correct deletions
-    correctDeletions = rawSv.loc[correctDeletionList, :].copy()
-    correctDeletions['Source'] = 'sv_data low_coverage'
+    deletionDf = rawSv.loc[isDeletion, ['index', 'Strain','Sample', 'Chromosome', 'StartReg', 'EndReg', 'readFrac' ]]
+    cleanDeletionDf = deletionDf.merge(cleanLowThresh, how='left', on=['Strain','Sample', 'Chromosome'])
     
-    badDeletions = rawSv.loc[badDeletionList, :].copy()
+    # use isSameRegion to find close matches for start and end regions 
+    cleanDeletionDf['isSameRegion'] = cleanDeletionDf.apply(lambda row: isSameRegion(row['StartReg_x'], row['EndReg_x'], 
+                                                                 row['StartReg_y'], row['EndReg_y']), axis=1)
+    cleanDeletionDf = cleanDeletionDf.loc[cleanDeletionDf['isSameRegion'], :]
+    # indicate that these rows have evidence from both sv_data and low_coverage
+    cleanDeletionDf['Source'] = 'sv_data low_coverage' 
+    # choose best readFrac value
+    cleanDeletionDf['readFrac'] = cleanDeletionDf[['readFrac_x', 'readFrac_y']].apply(max, axis=1)
+    
+    # get rid of unneeded columns and rename
+    cleanDeletionDf.rename(columns = {'StartReg_x': 'StartReg', 'EndReg_x': 'EndReg'}, inplace = True)
+    cleanDeletionDf.drop(['readFrac_x', 'StartReg_y', 'EndReg_y', 'readFrac_y',
+           'isSameRegion'], axis=1, inplace = True)
+    
+    colList = ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'Source',
+           'Type', 'readFrac']
+    
+    goodDeletionList = deletionDf['index'].isin(cleanDeletionDf['index'])
+    badDeletions = deletionDf.loc[~goodDeletionList, colList]
     badDeletions['Source'] = 'sv_data'
     
     # make dataframe with insertions
-    insertionDf = rawSv.loc[isInsertion, :].copy()
+    insertionDf = rawSv.loc[isInsertion, colList]
     insertionDf['Source'] = 'sv_data'
+    
+    # make dataframe with replacements
+    replacementDf = rawSv.loc[isReplacement, colList]
+    replacementDf['Source'] = 'sv_data'
     
     # originally I was planning to eliminate the 'badDeletions' because 
     # some of them show up due to transposon inversions
     # however this signature also shows up in strains where adhE was deleted and then re-inserted
     # i.e. LL1153
-    result = pd.concat([correctDeletions, badDeletions, insertionDf])
+    result = pd.concat([cleanDeletionDf, badDeletions, insertionDf, replacementDf])
+    result.drop('index', axis=1, inplace=True)
     
     # after cleaning, reset the row numbering to be consecutive
     result.reset_index(drop = True, inplace = True) 
-    
-    # fix chromosome spaces
-    result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
     
     return result
 
@@ -1261,6 +1321,32 @@ def run_command(command):
     return iter(p.stdout.readline, b'')
     
 
-
+def isSameRegion(start_x, end_x, start_y,  end_y):
+    """
+    copied from annotat_df_with_CDS_v6.py
+    I thought it was easier to copy this one function than to require the file to be imported
+    
+    determine whether 2 mutations are actually identical,
+    even if they have slightly different start and end coordinates
+    usually this is due to differences in read mapping
+    sometimes it can be caused by the presence of two adjacent mutations
+    i.e. a SNP and a breakpoint
+    """
+    isSame = False # boolean flag to hold the output, whether the two mutations are the same
+    
+    totDiff = abs(start_x - start_y) + abs(end_x - end_y) # total difference between start and end regions
+    if totDiff == 0: # if the region is identical, no further analysis needed
+        isSame = True
+        return isSame 
+    else:  # otherwise, check to see how big the difference is 
+        len_x = (end_x - start_x)
+        len_y = (end_y - start_y)
+        maxLen = max(len_x, len_y)
+        if maxLen > 0:
+            minOverlap = 1 - (float(totDiff) / maxLen)
+            if minOverlap > minOverlapThresh:
+                isSame = True
+    
+    return isSame
 
 print('done')

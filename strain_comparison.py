@@ -82,16 +82,39 @@ def find_origin_mutations(inMut, strainTbl):
             #print('\tfound origin mutation, mutID=', row['mutID'], ' strain=', row['StrainID'])
             originMutSer.loc[index] = True
     
-    inMut['isOrigin'] = originMutSer
+    # add new columns
+    inMut['isOrigin'] = originMutSer # flag to indicate if a mutation is an origin mutation
+    
+    # the combination of a unique parent strain ID and origin mutation ID indicates the appearance
+    # of a mutation.  Sometimes several strains have both the same origin mutation ID and same parent ID
+    # this usually means that the mutation occurred once, and that the strains are sisters
+    inMut['mut-par'] = inMut['mutID'].astype(str) + '-' + inMut['ParentID'] 
     
     return inMut
+
+
+def cleanOriginMut(originMutDf, inMut, strainTbl):
+    """
+    start with origin mutant dataframe
+    find repeated origin mutants and delete them
+    return the resulting originMut dataframe
+    """
+    badMut = findRepeatOriginMut(originMutDf, inMut, strainTbl)
+    badMutList = badMut['mutID'].tolist()
+    
+    result = originMutDf.loc[~originMutDf['mutID'].isin(badMutList), :]
+    print('cleanOriginMut: repeated origin mutations removed')
+    
+    return result
+
 
 def findRepeatOriginMut(originMutDf, inMut, strainTbl):
     """
     find origin mutations that are also present earlier in the lineage
-    these are likely to be wrong
-    either the mutation is called incorrectly (mutations on the threshold of calling appear and disappear)
-    or the strain lineage is wrong
+    these are likely to be wrong because:
+      1. either the mutation is called incorrectly 
+      (mutations on the threshold of calling appear and disappear) or
+      2. the strain lineage is wrong
     originMutDf is a dataframe with just origin mutations (i.e. output of find_origin_mutations where isOrigin is true)
     inMut is a dataframe with all mutations
     strainTbl (i.e. LLStrains)
@@ -120,35 +143,80 @@ def findRepeatOriginMut(originMutDf, inMut, strainTbl):
     return result
 
 
-def getStrainList(inMut):
-    """ get list of unique strains from a dataframe of mutations """
-    strainList = inMut['Strain'].unique().tolist()
-    
+def getStrainList(inDf):
+    """
+    get list of unique strains from a dataframe of mutations
+    the list of strains is either in a column with the name
+    'Strain' or 'StrainID' 
+    """
+    strCol = findStrainColumn(inDf)
+    strainList = inDf[strCol].unique().tolist()
     return strainList
+ 
     
-
+def findStrainColumn(inDf):
+    """ find the column in a dataframe that has the strain ID numbers """
+    if 'Strain' in inDf.columns:
+        result = 'Strain'
+    elif 'StrainID' in inDf.columns:
+        result = 'StrainID'
+    else:
+        raise ValueError ('No Strain or StrainID columns found')
+    
+    return result
+    
 
 def getStrainLineage(strainList, strainTbl):
     """
     calculate the lineages for all of the strains in the strain list
     """
+    strainCol = findStrainColumn(strainTbl)
+    
     parChiDf = findParentList(strainList, strainTbl)
-
+    
     lineageSer = pd.Series([False] * len(parChiDf)) 
     
     for index, row in parChiDf.iterrows():
         parList = []
         parId = row['ParentID']
-        while parId != rootStrainID:
+        #print(row['StrainID'])
+        while parId is not None: 
             parList.append(parId)
-            parId = parChiDf.loc[parChiDf['StrainID'] == parId, 'ParentID'].iloc[0]
-        parList.append(rootStrainID)
-        
+            # check to see if a parent strain was found
+            parResult = parChiDf.loc[parChiDf[strainCol] == parId, 'ParentID']
+            if len(parResult) > 0: # if the series is not empty, take the first value
+                parId = parResult.iloc[0]
+            else:
+                parId = None
+    
         lineageSer.loc[index] = parList
-        
+    
     parChiDf['Lineage'] = lineageSer 
 
     return parChiDf
+
+
+def getOneStrainLineage(strainID, strainTbl, inMut = None):
+    """ 
+    get the lineage for a single strain 
+    strainId is the strain whose lineage is requested
+    inMut contains a list of strains to be considered for lineage construction (if None, use all strains)
+    strainTbl (i.e. LLStrain.xlsx) has the master list of parent-child relationships
+    """
+    
+    # build strain list
+    if inMut is not None:
+        strainList = getStrainList(inMut)
+        #print('inMut used')
+    else:
+        strainList = getStrainList(strainTbl)
+        #print('strainTbl used')
+    
+    sl = getStrainLineage(strainList, strainTbl)
+    result = sl.loc[sl['StrainID'] == strainID, 'Lineage'].iloc[0]
+    
+    return result
+    
 
 #--------------------------------------------------------------------------------------
 # find all parent strains from list
@@ -225,7 +293,7 @@ def findParent(id, strainTbl):
 
 
 
-def make_distance_matrix(annoDf):
+def make_distance_matrix(allAnno):
     """
     starting with a dataframe of annotated mutations ('Chromosome', 'readFrac', 'mutID', 'Strain'),
     make 3 matricies
@@ -237,27 +305,30 @@ def make_distance_matrix(annoDf):
     zeroDistList = []
     
     # make list of strains, need to append LL1004 because it doesn't have any mutations, by definition 
-    strList = annoDf['Strain'].unique()
+    strList = allAnno['Strain'].unique()
     strList = np.append(strList, 'LL1004') # might be a good idea to check first to see if this is present
     
     # clean up list of mutations
-    rightGenome = annoAll['Chromosome'] == 'Cth_DSM_1313_genome'
-    rightReadFrac = annoAll['readFrac'] > 0.90
+    rightGenome = allAnno['Chromosome'] == 'Cth_DSM_1313_genome'
+    rightReadFrac = allAnno['readFrac'] > 0.80
     # use this for finding 'new' mutations, false positives are less of a problem, 
     # and some adaptation experiments give mutations with low penetration (i.e. readFrac < 0.9)
-    cl = annoAll.loc[rightGenome, :] 
+    cl = allAnno.loc[rightGenome, :] 
     
-    # use this for finding 'lost' mutations, to avoid false positives
+    # use this for finding 'lost' mutations, 
+    # include additional filter by readFraction to avoid false positives
     cl2 = cl.loc[rightReadFrac, :] 
     
     # make empty distance matrix
     # these are global variables
-    global distMat
-    global newMutMat
-    global lostMutMat
+    #global distMat
+    #global newMutMat
+    #global lostMutMat
     distMat = pd.DataFrame(None, index=strList, columns = strList )
     newMutMat = pd.DataFrame(None, index=strList, columns = strList )
     lostMutMat = pd.DataFrame(None, index=strList, columns = strList )
+    newMutID = pd.DataFrame(None, index=strList, columns = strList )
+    lostMutID = pd.DataFrame(None, index=strList, columns = strList )
     
     # make distance matrix
     for par in strList:
@@ -271,15 +342,188 @@ def make_distance_matrix(annoDf):
             parSetHigh = frozenset(cl2.loc[cl2['Strain'] == par, 'mutID'].tolist())
             chiSetHigh = frozenset(cl2.loc[cl2['Strain'] == chi, 'mutID'].tolist())
             
+            newMutSet = chiSetAll.difference(parSetAll)
+            newMutID.set_value(par, chi, newMutSet)
+            newMutMat.set_value(par, chi, len(newMutSet))
             
-            newMutMat.set_value(par, chi, len(chiSetAll.difference(parSetAll)))
-            lostMutMat.set_value(par, chi, len(parSetHigh.difference(chiSetHigh)))
-            distVal = len(chiSetAll.difference(parSetAll)) +len(parSetAll.difference(chiSetAll) )
+            lostMutSet = parSetHigh.difference(chiSetHigh)
+            lostMutID.set_value(par, chi, lostMutSet)
+            lostMutMat.set_value(par, chi, len(lostMutSet))
+            
+            distVal = len(newMutSet) + len(parSetAll.difference(chiSetAll) )
             distMat.set_value(par, chi, distVal )
             
-            if (distVal == 0) and (par != chi):
-                zeroDistList.append([par, chi].sort()) # sort [par, chi] list because order doesn't matter and it makes removing duplicates easier
-                #print('***** zero distance strain pair found *****')
-                #print('parent= ', par, ' child= ', chi)
-                
-    zeroDistDf = pd.DataFrame(zeroDistList, columns = ['Strain1', 'Strain2']).drop_duplicates()
+    return (distMat, newMutMat, lostMutMat, newMutID, lostMutID)
+            
+
+    
+def findZeroDistStrainPairs(distMat):
+    """
+    find pairs of strains that share all mutations in common
+    these are likely to be 'sister' colonies
+    """
+    df = pd.DataFrame(distMat.index, columns = ['Strain'])
+    df['joinCol'] = 1 # temporary column for merging
+    df2 = pd.merge(df, df, on='joinCol')
+    df2['dist'] = df2.apply(lambda row: distMat.loc[row['Strain_x'], row['Strain_y']], axis=1)
+    
+    sameStrain = df2['Strain_x'] == df2['Strain_y']
+    goodDist = df2['dist'] == 0
+    df3 = df2.loc[~sameStrain & goodDist, :]
+    df3 = df3.copy()
+    
+    # make sets of left-right pairs to allow us to get rid of duplicates (regardless of the order)
+    df3['set'] = df3.apply(lambda row: frozenset([row['Strain_x'], row['Strain_y']]), axis=1)
+    df3.reset_index(drop = True, inplace = True)
+    df4 = df3.loc[:,'set']
+    df4.drop_duplicates(inplace = True)
+    df5 = df3.loc[df3.index.isin(df4.index), ['Strain_x', 'Strain_y']]
+    result  = df5
+    
+    return result
+    
+    
+def compare_mutations(parStr, chiStr, mutDf, mutType):
+    """
+    given a parent strain (parStr)
+    a child strain (chiStr)
+    and a dataframe with mutations (mutDf)
+    and the type of comparison (mutType) mutType can be either 'lost' or 'new'
+    make a list of the 'lost' or 'new' mutations for manual analysis"""
+    
+    parMutSet = frozenset(mutDf.loc[mutDf['Strain'] == parStr, 'mutID'].tolist())
+    chiMutSet = frozenset(mutDf.loc[mutDf['Strain'] == chiStr, 'mutID'].tolist())
+    
+    # list of columns to include at the end
+    resultColList = ['mutID', 'Strain', 'Chromosome', 'Source', 
+                    'StartReg', 'EndReg', 'Description', 'Type', 
+                     'Annotation name', 'readFrac']
+    
+    if mutType == 'lost':
+        mutList = parMutSet.difference(chiMutSet)
+        inMutList = mutDf['mutID'].isin(mutList)
+        rightStr = mutDf['Strain'] == parStr
+    elif mutType == 'new':
+        mutList = chiMutSet.difference(parMutSet)
+        inMutList = mutDf['mutID'].isin(mutList)
+        rightStr = mutDf['Strain'] == chiStr
+    else:
+        print('error, mutType not specified correctly')
+
+    # mutations present in the parent strain that were lost in the child strain 
+    print('# differences = ', len(mutList))
+
+    result = mutDf.loc[inMutList & rightStr, resultColList].sort_values('StartReg')
+    result['readFrac'] = result['readFrac'].round(2) # clean up decimal places
+    return result    
+    
+def findBestParentStrain(chiStrain, distMat, newMutMat, lostMutMat, newID, lostID):
+    """
+    given a strain, find the strain most likely to be its parent, based on mutation data
+    algorithm summary:
+      1. find the set of strains with the fewest number of lost mutations
+      2. in that set, find the strain with the fewest number of new mutations
+      3. note that ties are possible
+    return a dataframe with all of the possible matches sorted from best to worst
+    """
+    resultList = [] # empty list to hold candidate parent strains
+    chiColumn = lostMutMat.loc[lostMutMat.index != chiStrain, chiStrain] # prevent strain from searching for itself as a parent
+    minLost = chiColumn.sort_values().unique() # list of numbers of lost mutations
+    # find strains that match the minLost criteria
+    counter = -1 # start at -1 because the first pass through the loop always adds 1 
+    #print('minLost= ', minLost)
+    for i in minLost:
+        #print('i= ', i)
+        minNew = -1 # minimum number of new mutations, -1 indicates counter has been reset
+        strIdx = chiColumn[chiColumn == i].index
+        #print('strIdx ', strIdx)
+        # make a submatrix from the newMutations matrix
+        # choose the strain with the fewest new mutations
+        m = newMutMat.loc[strIdx, chiStrain].sort_values()
+        #print('-----------')
+        #display(m)
+        for index, row in m.iteritems():
+            #print(index, counter)
+            if row > minNew:
+                #resultList.append([index, counter, i, row, distMat.loc[index, chiStrain]])
+                minNew = row
+                counter += 1
+            
+            resultList.append([index, counter, i, row, distMat.loc[index, chiStrain], lostID.loc[index, chiStrain], newID.loc[index, chiStrain]])
+    
+    result = pd.DataFrame(resultList, columns=['Strain', 'Order', 'num lost', 'num new', 'Distance', 'lostMutID', 'newMutID']).set_index('Strain')
+    
+    return result
+    
+    
+    
+def findBestParentStrainV2(chiStrain, distMat, newMutMat, lostMutMat, newID, lostID):
+    """
+    given a strain, find the strain most likely to be its parent, based on mutation data
+    algorithm summary:
+      1. find the set of strains with shortest Hamming distance
+      2. go down the list until you find a strain where numNew > numLost
+      3. that is the best parent strain
+      
+      2. in that set, find the strain with the fewest number of new mutations
+      3. note that ties are possible
+    return a dataframe with all of the possible matches sorted from best to worst
+    """
+    resultList = [] # empty list to hold candidate parent strains
+    chiColumn = lostMutMat.loc[lostMutMat.index != chiStrain, chiStrain] # prevent strain from searching for itself as a parent
+    minLost = chiColumn.sort_values().unique() # list of numbers of lost mutations
+    # find strains that match the minLost criteria
+    counter = -1 # start at -1 because the first pass through the loop always adds 1 
+    #print('minLost= ', minLost)
+    for i in minLost:
+        #print('i= ', i)
+        minNew = -1 # minimum number of new mutations, -1 indicates counter has been reset
+        strIdx = chiColumn[chiColumn == i].index
+        #print('strIdx ', strIdx)
+        # make a submatrix from the newMutations matrix
+        # choose the strain with the fewest new mutations
+        m = newMutMat.loc[strIdx, chiStrain].sort_values()
+        #print('-----------')
+        #display(m)
+        for index, row in m.iteritems():
+            #print(index, counter)
+            if row > minNew:
+                #resultList.append([index, counter, i, row, distMat.loc[index, chiStrain]])
+                minNew = row
+                counter += 1
+            
+            resultList.append([index, counter, i, row, distMat.loc[index, chiStrain], lostID.loc[index, chiStrain], newID.loc[index, chiStrain]])
+    
+    result = pd.DataFrame(resultList, columns=['Strain', 'Order', 'num lost', 'num new', 'Distance', 'lostMutID', 'newMutID']).set_index('Strain')
+    
+    return result
+        
+def buildParentStrainMatrix(distMat, newMutMat, lostMutMat):
+    """
+    find the best parent strain for each strain
+    """
+    strainList = distMat.index.tolist()    
+    resultMatrix = pd.DataFrame(np.nan, index=distMat.index, columns=distMat.index )
+    for strain in strainList:
+        parDf = findBestParentStrain(strain, distMat, newMutMat, lostMutMat)
+        parSer = parDf['Order'].copy()
+        resultMatrix.loc[:, strain] = parSer
+        
+    return resultMatrix
+    
+def pairsFromParStrainMat(m):
+    """
+    given a parent strain matrix from buildParentStrainMatrix
+    find the parent strains with score = 0 (i.e. the best ones)
+    note, sometimes a strain has more than one parent
+    """
+    strainList = m.index.tolist()
+    resultList = []
+    for strain in strainList:
+        parSer = m.loc[:,strain]
+        bestPar = parSer[parSer == 0].index.tolist()
+        resultList.append([strain, bestPar])
+    
+    result = pd.DataFrame(resultList, columns = ('Strain', 'Best parent'))
+    return result
+    
