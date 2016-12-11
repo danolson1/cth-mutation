@@ -127,7 +127,7 @@ def findRepeatOriginMut(originMutDf, inMut, strainTbl):
     # loop through origin mutations
     for index, row in originMutDf.iterrows():
         parId = row['ParentID']
-        while parId != rootStrainID:
+        while (parId != rootStrainID) and (parId is not np.nan):
             parentOriginMutList = originMutDf.loc[originMutDf['Strain'] == parId, 'mutID']
             #print(row['mutID'])
             #print(row['Strain'])
@@ -288,29 +288,27 @@ def findParent(id, strainTbl):
     return parId
 
 
-
-
-
-
-
-def make_distance_matrix(allAnno):
+def make_distance_matrix(allAnno, minReadFrac = 0.80):
     """
     starting with a dataframe of annotated mutations ('Chromosome', 'readFrac', 'mutID', 'Strain'),
     make 3 matricies
     distMat is a distance matrix between each strain (Hamming distance)
     newMutMat is a matrix with the number of new mutations in each 'child' strain compared to its 'parent'
-    lostMutMat is a matrix with the number of mutations each 'child' strain has lost compared to each 'paremt'
+    lostMutMat is a matrix with the number of mutations each 'child' strain has lost compared to each 'parent'
+    minReadFrac is set to filter out marginal reads.  Default value is 0.80
     """
     # list of strains with zero distance (i.e. identical strains)
     zeroDistList = []
     
     # make list of strains, need to append LL1004 because it doesn't have any mutations, by definition 
     strList = allAnno['Strain'].unique()
-    strList = np.append(strList, 'LL1004') # might be a good idea to check first to see if this is present
+    # if LL1004 isn't in the list, add it
+    if 'LL1004' not in strList:
+        strList = np.append(strList, 'LL1004')
     
     # clean up list of mutations
     rightGenome = allAnno['Chromosome'] == 'Cth_DSM_1313_genome'
-    rightReadFrac = allAnno['readFrac'] > 0.80
+    rightReadFrac = allAnno['readFrac'] >= minReadFrac
     # use this for finding 'new' mutations, false positives are less of a problem, 
     # and some adaptation experiments give mutations with low penetration (i.e. readFrac < 0.9)
     cl = allAnno.loc[rightGenome, :] 
@@ -355,7 +353,6 @@ def make_distance_matrix(allAnno):
             
     return (distMat, newMutMat, lostMutMat, newMutID, lostMutID)
             
-
     
 def findZeroDistStrainPairs(distMat):
     """
@@ -416,6 +413,7 @@ def compare_mutations(parStr, chiStr, mutDf, mutType):
     result = mutDf.loc[inMutList & rightStr, resultColList].sort_values('StartReg')
     result['readFrac'] = result['readFrac'].round(2) # clean up decimal places
     return result    
+ 
     
 def findBestParentStrain(chiStrain, distMat, newMutMat, lostMutMat, newID, lostID):
     """
@@ -454,7 +452,6 @@ def findBestParentStrain(chiStrain, distMat, newMutMat, lostMutMat, newID, lostI
     result = pd.DataFrame(resultList, columns=['Strain', 'Order', 'num lost', 'num new', 'Distance', 'lostMutID', 'newMutID']).set_index('Strain')
     
     return result
-    
     
     
 def findBestParentStrainV2(chiStrain, distMat, newMutMat, lostMutMat, newID, lostID):
@@ -497,6 +494,7 @@ def findBestParentStrainV2(chiStrain, distMat, newMutMat, lostMutMat, newID, los
     result = pd.DataFrame(resultList, columns=['Strain', 'Order', 'num lost', 'num new', 'Distance', 'lostMutID', 'newMutID']).set_index('Strain')
     
     return result
+    
         
 def buildParentStrainMatrix(distMat, newMutMat, lostMutMat):
     """

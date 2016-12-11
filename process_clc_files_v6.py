@@ -75,7 +75,7 @@ minOverlapThresh = 0.98 # mutations must be 98% overlapped to be considered iden
 maxHitEndDistance = 20 # maximum distance between BLAST hit and end of sequence, important for insertions
  
 eValue = 1e-6 # default E-value to use for BLAST searches
-minNumReads = 4 # for filtering breakpoints
+minNumReads = 3 # for filtering breakpoints (comparison uses >= constraint)
 minLength = 15 # for filtering breakpoints
 
 # folder with output text files from CLC SFRE batch run
@@ -167,14 +167,18 @@ def combineMutations(inBpDf = None, svDf = None, lowThresh = None, highThresh = 
     # clean up input data
     # check to make sure it's present first
     print('\n### cleaning input data ###')
+    if (highThresh is not None):
+        (cleanHighThresh, cleanHighThreshAll, avgCov) = cleanHighThreshold(highThresh) # ignore res and avgCov for now
+    if (lowThresh is not None):
+        cleanLowThresh = cleanLowThreshold(lowThresh, cleanHighThreshAll)
+    
     if (svDf is not None) and (lowThresh is not None):
-        cleanSv = cleanStructuralVariants(svDf, lowThresh) # make sure deletions have < 10 coverage across most of their length
+        cleanSv = cleanStructuralVariants(svDf, cleanLowThresh) # make sure deletions have < 10 coverage across most of their length
     if (snpDf is not None):
         cleanSnp = cleanSnpMutations(snpDf)
     if (indelDf is not None):
         cleanI = cleanIndel(indelDf)
-    if (highThresh is not None):
-        (cleanHighThresh, res, avgCov) = cleanHighThreshold(highThresh) # ignore res and avgCov for now
+    
 
     # match breakpoints
     # previously I had been eliminating breakpoints after I matched them
@@ -208,14 +212,11 @@ def combineMutations(inBpDf = None, svDf = None, lowThresh = None, highThresh = 
         # keep the SV mutations who didn't match any breakpoints
         # the evidence that they're real is less strong than for the matchedSv mutations, 
         # but we may still be interested in them
-        leftoverCleanSv = cleanSv.loc[~cleanSv.index.isin(matchedSv.index), ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'Variant ratio', 'Name', 'Source']]
-        leftoverCleanSv.rename(columns = {'Name':'Type', 'Variant ratio':'readFrac'}, inplace = True)
+        leftoverCleanSv = cleanSv.loc[~cleanSv.index.isin(matchedSv.index), ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'readFrac', 'Type', 'Source']]
         
         # check for duplicates based on close distance
         leftoverCleanSv = checkForDuplicate(matchedSv, leftoverCleanSv)
-        
-           
-
+         
     # export list of unmatched breakpoints
     # need to fix this part, since I got rid of the hierarchical searching
     #remainingBp3.to_csv('unmatched_breakpoints.csv')
@@ -225,8 +226,7 @@ def combineMutations(inBpDf = None, svDf = None, lowThresh = None, highThresh = 
     result = pd.concat([cleanSnp, cleanI, matchedIns, matchedIns2, matchedSv, leftoverCleanSv, cleanHighThresh])
 
     # check cleanLowThresh for duplicates
-    if (lowThresh is not None):
-        cleanLowThresh = cleanLowThreshold(lowThresh)
+    if (cleanLowThresh is not None):
         cleanLowThresh = checkForDuplicate(result, cleanLowThresh)
         result = pd.concat([result, cleanLowThresh])
      
@@ -241,27 +241,22 @@ def checkForDuplicate(inGood, inPossibleDupe):
     """ 
     given 2 dataframes, check for possible duplicate mutations
     match chromosome, strain, sample, type
-    StartReg and EndReg of both duplications should be within 50 bp
-    return a dataframe with the non-duplicated rows
+    the mutations should overlap by 98% based on "isSameRegion" function
+    return a dataframe with the non-duplicated rows, i.e. only the rows of "inPossibleDupe"
+    that are not present in "inGood"
     """
-    result = inPossibleDupe.copy().reset_index()
-    result = result.merge(inGood, how='inner', on=['Chromosome', 'Sample', 'Strain', 'Type'])
-    result['sDist'] = result['StartReg_x'] - result['StartReg_y']
-    result['eDist'] = result['EndReg_x'] - result['EndReg_y']
-    result['totDist'] = result['sDist'].abs() + result['eDist'].abs()
-    result.sort_values('totDist', inplace = True) # sort values so that next step takes the smallest result
-    result = result.groupby('index').first() # choose the rows with the shortest totDist
-    result[['Chromosome', 'StartReg_x', 'StartReg_y', 'totDist']]
+    dup = inPossibleDupe.copy().reset_index()
+    dup = dup.merge(inGood, how='inner', on=['Chromosome', 'Sample', 'Strain', 'Type'])
     
+    # use isSameRegion to find close matches for start and end regions 
+    dup['isSameRegion'] = dup.apply(lambda row: isSameRegion(row['StartReg_x'], row['EndReg_x'], 
+                                                                 row['StartReg_y'], row['EndReg_y']), axis=1)
     # if the total distance between the two start regions and the two end regions is less than 20
     # the two regions probably have a substantial amount of overlap
-    dupRows = result['totDist'] < 20
-    
-    # get just the good rows
-    goodRows = result.loc[~dupRows, :]
+    dupRows = dup.loc[dup['isSameRegion'], 'index'].tolist()
     
     # return the non-duplicated rows from the original inPossibleDupe dataframe
-    result = inPossibleDupe.loc[inPossibleDupe.index.isin(goodRows.index), :]
+    result = inPossibleDupe.loc[~inPossibleDupe.index.isin(dupRows), :]
     return result
     
     
@@ -326,12 +321,12 @@ def cleanBreakpoints(rawBP):
     
     # build boolean filters
     seqNotNull = pd.notnull(rawBP['Unaligned'])  # check to make sure the 'Unaligned' value is not null
-    seqLongEnough = rawBP['Unaligned'].str.len() > minLength  # choose a minimum BP length,
+    seqLongEnough = rawBP['Unaligned'].str.len() >= minLength  # choose a minimum BP length,
                                                            # short sequences don't have enough information for BLAST
                                                            # seq length should be determined from length of 
                                                            # 'Unaligned', not the 'Unaligned length' integer
                                                            # since this may have changed based on regex replacements
-    enoughReads = rawBP['Reads'] > minNumReads  # samples with only a few reads are likely to be sequencing errors
+    enoughReads = rawBP['Reads'] >= minNumReads  # samples with only a few reads are likely to be sequencing errors
     cleanRawBP = rawBP.loc[seqNotNull & seqLongEnough & enoughReads, :]
 
     print('done cleaning up rawBP')
@@ -535,7 +530,7 @@ def cleanStructuralVariants(rawSv, cleanLowThresh):
     rawSv = rawSv.loc[isDeletion | isInsertion | isReplacement, :]
     
     
-    deletionDf = rawSv.loc[isDeletion, ['index', 'Strain','Sample', 'Chromosome', 'StartReg', 'EndReg', 'readFrac' ]]
+    deletionDf = rawSv.loc[isDeletion, ['index', 'Strain','Sample', 'Chromosome', 'StartReg', 'EndReg', 'readFrac' , 'Left breakpoints', 'Right breakpoints' ]]
     cleanDeletionDf = deletionDf.merge(cleanLowThresh, how='left', on=['Strain','Sample', 'Chromosome'])
     
     # use isSameRegion to find close matches for start and end regions 
@@ -553,19 +548,22 @@ def cleanStructuralVariants(rawSv, cleanLowThresh):
            'isSameRegion'], axis=1, inplace = True)
     
     colList = ['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'Source',
-           'Type', 'readFrac']
+           'Type', 'readFrac', 'Left breakpoints', 'Right breakpoints']
     
     goodDeletionList = deletionDf['index'].isin(cleanDeletionDf['index'])
     badDeletions = deletionDf.loc[~goodDeletionList, colList]
     badDeletions['Source'] = 'sv_data'
+    badDeletions['Type'] = 'Deletion'
     
     # make dataframe with insertions
     insertionDf = rawSv.loc[isInsertion, colList]
     insertionDf['Source'] = 'sv_data'
+    insertionDf['Type'] = 'Insertion - tandem dup'
     
     # make dataframe with replacements
     replacementDf = rawSv.loc[isReplacement, colList]
     replacementDf['Source'] = 'sv_data'
+    replacementDf['Type'] = 'Replacement'
     
     # originally I was planning to eliminate the 'badDeletions' because 
     # some of them show up due to transposon inversions
@@ -621,10 +619,10 @@ def cleanSnpMutations(rawSnp):
     return cleanRawSnp    
     
 
-def match_insertions(inDf, maxDist, seqList, filterByDist = False, filterByEndDist = False):
+def match_insertions(identifiedBp, maxDist, seqList, filterByDist = False, filterByEndDist = False):
     # select just the breakpoints with BLAST hits from the list of sequences from seqName
     # for example, if seqName is 'Cth_transposons.fa', just match transposons
-    transpDf = inDf[inDf['BLAST source'] == seqList]
+    transpDf = identifiedBp[identifiedBp['BLAST source'] == seqList]
     
     # check to see if transpDf is empty
     if len(transpDf) == 0:
@@ -632,17 +630,15 @@ def match_insertions(inDf, maxDist, seqList, filterByDist = False, filterByEndDi
               'This will generate a runtime error when you try to merge 2 empty dataframes. '
               'This error can be ignored')
     
-    
     # split transposons into left and right groups and only keep the relevant columns
     transpDfLeft = transpDf.loc[transpDf['Name'] == 'Left breakpoint', ['Strain','Sample', 'Chromosome', 
                                                                         'Hit Name', 'Seq Name', 'StartReg', 
-                                                                        'EndReg', 'Fraction non-perfectly mapped', 
+                                                                        'EndReg', 'readFrac', 
                                                                         'BP distance', 'Hit end distance']]
     transpDfRight = transpDf.loc[transpDf['Name'] == 'Right breakpoint', ['Strain','Sample','Chromosome', 
                                                                           'Hit Name', 'Seq Name', 'StartReg',
-                                                                          'EndReg', 'Fraction non-perfectly mapped', 
+                                                                          'EndReg', 'readFrac', 
                                                                           'BP distance', 'Hit end distance']]
-    
     
     # do an inner join of left and right sets of breakpoints
     # match all breakpoints with the same name and chromosome
@@ -662,7 +658,7 @@ def match_insertions(inDf, maxDist, seqList, filterByDist = False, filterByEndDi
         # select all rows that match the smallest distance
         minDistIdx = lr.groupby('Seq Name L')['absDist'].transform(min) == lr['absDist']
         lr = lr.loc[minDistIdx, :]    
-        
+    
     # filter by end distance (i.e. the distance between where the breakpoint starts matching and 
     # the start of the sequence).  Real insertion sequences have breakpoints that match only at the
     # ends (i.e. Hit end distance is close to 0).  This is not important for other types of mutations
@@ -678,11 +674,11 @@ def match_insertions(inDf, maxDist, seqList, filterByDist = False, filterByEndDi
         # select rows where 'allEndDist' is equal to the minimum 'allEndDist' value in the group
         minAllDistIdx = lr.groupby('Seq Name L')['allEndDist'].transform(min) == lr['allEndDist']
         lr = lr.loc[minAllDistIdx, :]
-
+    
     result = lr.copy()
     ## Clean up dataframe
     # add new columns as necessary
-    result['readFrac'] = (result['Fraction non-perfectly mapped L'] + result['Fraction non-perfectly mapped R']) / 2
+    result['readFrac'] = (result['readFrac L'] + result['readFrac R']) / 2
     result['Type'] = 'Insertion'
     result['Source'] = 'match_insertion_' + seqList[:5] # add first 6 letters of seq list to distinguish origins 
     
@@ -707,9 +703,9 @@ def match_insertions(inDf, maxDist, seqList, filterByDist = False, filterByEndDi
     # make a list of the values in the lBpId and rBpId columns
     matchedBpList =  sorted(result['lBpId'].astype(int).tolist() + result['rBpId'].astype(int).tolist())
     # match those against the original list
-    matchedBooleanSeries = inDf['Seq Name'].astype(int).isin(matchedBpList)
+    matchedBooleanSeries = identifiedBp['Seq Name'].astype(int).isin(matchedBpList)
     # find the original breakpoints whose breakpoint IDs are not in the matchedBpList
-    remainingBp = inDf.loc[~matchedBooleanSeries, :]
+    remainingBp = identifiedBp.loc[~matchedBooleanSeries, :]
     
     return (result, remainingBp)
 
@@ -717,14 +713,43 @@ def match_insertions(inDf, maxDist, seqList, filterByDist = False, filterByEndDi
 def match_bp_to_sv(inSv, inBpDf):
     """
     match breakpoints to SV mutations
-    note, at some point we might want to also match these against the table of known mutations
-    this would give us an "AlleleID" column
+    first split inBpDf into left and right breakpoints
+    match these breakpoints to the structural variants column "Left breakpoints" and "Right breakpoints"
+    re-calculate the read fraction, choosing the best value
     """
     tsv = inSv.copy()
     tsv['Left breakpoints'] = tsv['Left breakpoints'].astype(int).astype(str) # cast this as a string for subsequent matching
+    tsv['Right breakpoints'] = tsv['Right breakpoints'].astype(int).astype(str) # cast this as a string for subsequent matching
+    
+    # columns from identifiedBp that we want to keep
+    bpColumns = ['Chromosome',
+                 #'Region',
+                 'Name',
+                 #'p-value',
+                 #'Unaligned',
+                 #'Unaligned length',
+                 #'Mapped to self',
+                 #'Perfect mapped',
+                 #'Not perfect mapped',
+                 #'Ignored mapped',
+                 #'Fraction non-perfectly mapped',
+                 #'Sequence complexity',
+                 #'Reads',
+                 'Strain',
+                 'Sample',
+                 'readFrac',
+                 'StartReg',
+                 'EndReg',
+                 'Seq Name',
+                 #'Hit Name',
+                 #'e-value',
+                 #'BP distance',
+                 'Hit end distance',
+                 #'BLAST source'
+                ]
     
     # split breakpoints into left and right matches
-    tbp = inBpDf.copy()
+    tbp = inBpDf.loc[:, bpColumns]
     tbp['Start'] = tbp['StartReg'].astype(str) # cast this as a string to match the string values in 'Left breakpoints' in the SV dataframe
     tbp.drop(['StartReg', 'EndReg'], axis=1, inplace=True)
     tbp.sort_values(['Strain', 'Chromosome', 'Start'], inplace=True, ascending=False)
@@ -738,6 +763,7 @@ def match_bp_to_sv(inSv, inBpDf):
     r1 = tsv.merge(tbpLeft, how='inner', 
                    left_on=['Strain','Chromosome', 'Left breakpoints'], 
                    right_index=True,
+                   suffixes = ('_sv','')
                   )
     # join right BPs to SVs
     result = r1.merge(tbpRight, how='inner', 
@@ -753,11 +779,17 @@ def match_bp_to_sv(inSv, inBpDf):
     result = result.sort_values('totHitEndDist', ascending = True)
     result = result.groupby(result.index).head(1)
     
+    
+    # do readFrac calculation
+    result['readFrac_bp'] = (result['readFrac_L'] + result['readFrac_R'])/2
+    # choose best readFrac value
+    result['readFrac'] = result[['readFrac_bp', 'readFrac_sv']].apply(max, axis=1)
+    
     #print('cleaning up dataframe...')
     ## Clean up dataframe
     # rename columns
     result.rename(columns={'Name': 'Type',
-                           'Variant ratio': 'readFrac',
+                           #'Variant ratio': 'readFrac',
                            'Seq Name_L':'lBpId',
                            'Seq Name_R':'rBpId',
                           }, inplace=True)
@@ -772,6 +804,9 @@ def match_bp_to_sv(inSv, inBpDf):
     # fix chromosome spaces
     result['Chromosome'] = result['Chromosome'].apply(fixChromosomeSpaces)
     
+    # rename columns
+    result.rename(columns = {'Sample_sv':'Sample'}, inplace=True)
+    
     # select only the columns we need
     result = result[['Strain', 'Sample', 'Chromosome', 'StartReg', 'EndReg', 'lBpId', 'rBpId', 'readFrac',
                      'Type', 'Source']]
@@ -783,7 +818,7 @@ def match_bp_to_sv(inSv, inBpDf):
     # match those against the original list
     matchedBooleanSeries = inBpDf['Seq Name'].astype(int).isin(matchedBpList)
     # find the original breakpoints whose breakpoint IDs are not in the matchedBpList
-    remainingBp = inBpDf.loc[~matchedBooleanSeries, :]   
+    remainingBp = inBpDf.loc[~matchedBooleanSeries, :]    
     return (result, remainingBp)
 
 
@@ -851,7 +886,7 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
                     '(\.(\d{1,2}))?'                            # backref 6 - version (optional)
                     '\.txt'
                     )
-        
+    
     typeDict = {
         'threshold':'Thr',
         'SV':'SV',
@@ -863,12 +898,15 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
     fileList = []
     for file in os.listdir(filePath):
         if file.endswith('.txt'):
+            modDate = os.path.getmtime((os.path.join(filePath, file))) # to make sure we only use the most recent version
+            
             result = p.findall(file)
             #print(file)
+            #print('mod date= ',modDate)
             #print(result)
             strainID = result[0][0]
             fileType = typeDict[result[0][2]]
-            
+    
             # add low10 or high20 identifier to the end of Thr
             # low10 is the default option
             if fileType == 'Thr': # get low10 or high20 identifier
@@ -876,22 +914,22 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
                     fileType  = fileType + result[0][3]
                 else:
                     fileType  = fileType + '_low10'
-            
+    
             if result[0][5] is '': # the file doesn't have a value in the fileVers location
                 fileVers = 0
             else:
                 fileVers = int(result[0][5]) # get the value
     
-            row = [file, strainID, fileType, fileVers]
+            row = [file, strainID, fileType, fileVers, modDate]
             fileList.append(row)
-        
-    clcFilesDf = pd.DataFrame(fileList, columns = ['Filename', 'StrainID', 'Type', 'Version'])
+    
+    clcFilesDf = pd.DataFrame(fileList, columns = ['Filename', 'StrainID', 'Type', 'Version', 'Timestamp'])
     
     ### for testing
     #clcFilesDf.to_excel('clcFilesDf.xlsx')
     
-    # for each strain and type, make sure we only select the row with the highest version number
-    maxVersionIndex = clcFilesDf.groupby(['StrainID', 'Type'])['Version'].transform(max) == clcFilesDf['Version']
+    # for each strain and type, make sure we only select the row with the latest timestamp
+    maxVersionIndex = clcFilesDf.groupby(['StrainID', 'Type'])['Timestamp'].transform(max) == clcFilesDf['Timestamp']
     clcFilesDf = clcFilesDf.loc[maxVersionIndex, :]
     
     # read master strain list excel file
@@ -912,7 +950,7 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
         print('###########################', item, '###########################')
         resultList = [] # list to hold dataframes from each individual file
         fileTypeDf = clcFilesDf.loc[clcFilesDf['Type'] == item, :]
-        
+    
         # loop through each row of the new dataframe
         for index, row in fileTypeDf.iterrows():
             # read the file into a dataframe
@@ -925,10 +963,10 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
             df['Sample'] = sampleName
             # need to look up Sample ID from strain table and add it
             resultList.append(df)
-            
+    
         # append the individual CLC files of one type into a single dataframe
         clcTypeDf = pd.concat(resultList).reset_index(drop=True)
-        
+    
         resultDict[item] = clcTypeDf
         
     return resultDict
