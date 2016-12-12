@@ -246,18 +246,21 @@ def checkForDuplicate(inGood, inPossibleDupe):
     that are not present in "inGood"
     """
     dup = inPossibleDupe.copy().reset_index()
-    dup = dup.merge(inGood, how='inner', on=['Chromosome', 'Sample', 'Strain', 'Type'])
-    
-    # use isSameRegion to find close matches for start and end regions 
-    dup['isSameRegion'] = dup.apply(lambda row: isSameRegion(row['StartReg_x'], row['EndReg_x'], 
-                                                                 row['StartReg_y'], row['EndReg_y']), axis=1)
-    # if the total distance between the two start regions and the two end regions is less than 20
-    # the two regions probably have a substantial amount of overlap
-    dupRows = dup.loc[dup['isSameRegion'], 'index'].tolist()
-    
-    # return the non-duplicated rows from the original inPossibleDupe dataframe
-    result = inPossibleDupe.loc[~inPossibleDupe.index.isin(dupRows), :]
-    return result
+    if len(dup) <= 0:
+        return inGood[0:0] # return empty dataframe that will be compatible with subsequent steps
+    else:
+        dup = dup.merge(inGood, how='inner', on=['Chromosome', 'Sample', 'Strain', 'Type']) # this gives an error if dup is zero-length
+        
+        # use isSameRegion to find close matches for start and end regions 
+        dup['isSameRegion'] = dup.apply(lambda row: isSameRegion(row['StartReg_x'], row['EndReg_x'], 
+                                                                     row['StartReg_y'], row['EndReg_y']), axis=1)
+        # if the total distance between the two start regions and the two end regions is less than 20
+        # the two regions probably have a substantial amount of overlap
+        dupRows = dup.loc[dup['isSameRegion'], 'index'].tolist()
+        
+        # return the non-duplicated rows from the original inPossibleDupe dataframe
+        result = inPossibleDupe.loc[~inPossibleDupe.index.isin(dupRows), :]
+        return result
     
     
 def cleanIndel(rawIndel):

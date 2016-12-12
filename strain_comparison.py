@@ -452,58 +452,16 @@ def findBestParentStrain(chiStrain, distMat, newMutMat, lostMutMat, newID, lostI
     result = pd.DataFrame(resultList, columns=['Strain', 'Order', 'num lost', 'num new', 'Distance', 'lostMutID', 'newMutID']).set_index('Strain')
     
     return result
-    
-    
-def findBestParentStrainV2(chiStrain, distMat, newMutMat, lostMutMat, newID, lostID):
-    """
-    given a strain, find the strain most likely to be its parent, based on mutation data
-    algorithm summary:
-      1. find the set of strains with shortest Hamming distance
-      2. go down the list until you find a strain where numNew > numLost
-      3. that is the best parent strain
       
-      2. in that set, find the strain with the fewest number of new mutations
-      3. note that ties are possible
-    return a dataframe with all of the possible matches sorted from best to worst
-    """
-    resultList = [] # empty list to hold candidate parent strains
-    chiColumn = lostMutMat.loc[lostMutMat.index != chiStrain, chiStrain] # prevent strain from searching for itself as a parent
-    minLost = chiColumn.sort_values().unique() # list of numbers of lost mutations
-    # find strains that match the minLost criteria
-    counter = -1 # start at -1 because the first pass through the loop always adds 1 
-    #print('minLost= ', minLost)
-    for i in minLost:
-        #print('i= ', i)
-        minNew = -1 # minimum number of new mutations, -1 indicates counter has been reset
-        strIdx = chiColumn[chiColumn == i].index
-        #print('strIdx ', strIdx)
-        # make a submatrix from the newMutations matrix
-        # choose the strain with the fewest new mutations
-        m = newMutMat.loc[strIdx, chiStrain].sort_values()
-        #print('-----------')
-        #display(m)
-        for index, row in m.iteritems():
-            #print(index, counter)
-            if row > minNew:
-                #resultList.append([index, counter, i, row, distMat.loc[index, chiStrain]])
-                minNew = row
-                counter += 1
-            
-            resultList.append([index, counter, i, row, distMat.loc[index, chiStrain], lostID.loc[index, chiStrain], newID.loc[index, chiStrain]])
-    
-    result = pd.DataFrame(resultList, columns=['Strain', 'Order', 'num lost', 'num new', 'Distance', 'lostMutID', 'newMutID']).set_index('Strain')
-    
-    return result
-    
         
-def buildParentStrainMatrix(distMat, newMutMat, lostMutMat):
+def buildParentStrainMatrix(distMat, newMutMat, lostMutMat, newID, lostID):
     """
     find the best parent strain for each strain
     """
     strainList = distMat.index.tolist()    
     resultMatrix = pd.DataFrame(np.nan, index=distMat.index, columns=distMat.index )
     for strain in strainList:
-        parDf = findBestParentStrain(strain, distMat, newMutMat, lostMutMat)
+        parDf = findBestParentStrain(strain, distMat, newMutMat, lostMutMat, newID, lostID)
         parSer = parDf['Order'].copy()
         resultMatrix.loc[:, strain] = parSer
         
