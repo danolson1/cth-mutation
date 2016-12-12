@@ -53,7 +53,9 @@ def find_origin_mutations(inMut, strainTbl):
     """
     strainTbl is a table with all of the parent-child relationships, 
     i.e. complete LLStrains table
-    it needs to have the following columns:
+    note: to limit mutations, filter them out of inMut first
+    
+    strainTbl needs to have the following columns:
         "StrainID" with the strain ID and
         "Parent strain" with the parent strain ID
     inMut is a list of mutations.  It needs to have the following columns:
@@ -269,12 +271,16 @@ def findParent(id, strainTbl):
         "id" is string with strain ID
         "strainTbl" is dataframe with strain ID and parent strain ID (i.e. LLStrains)
             "StrainID" is strain ID
-            "ParentStrain" is parent strain ID
+            "ParentID" is parent strain ID
     """
+    # rename the column from LLStrain table if needed, for consistency
+    if 'ParentStrain' in strainTbl.columns:
+        strainTbl.rename(columns = {'ParentStrain':'ParentID'}, inplace = True)
+    
     #print('findParent: id in=', id)
     parId = '' # default "not found" value
     
-    parResult = strainTbl.loc[strainTbl['StrainID'] == id, 'ParentStrain'] # might be null
+    parResult = strainTbl.loc[strainTbl['StrainID'] == id, 'ParentID'] # might be null
     if len(parResult) > 0:
         parId = parResult.iloc[0]
     else:
