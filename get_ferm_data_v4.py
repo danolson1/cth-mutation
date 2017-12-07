@@ -151,6 +151,19 @@ def setup(fp = filePath):
     return cleanFermData
 
 
+def getAllAgFermData(fermProdList, fermData, parChiDf):
+    """
+    get aggregated fermentation data for all products in fermProdList
+    """
+    #fermProdList = ['carbon balance', 'YpelC', 'Yform', 'Ylac', 'Yac', 'Yet', 'Ypyr',
+    #       'Ymal', 'Yh2', 'PforFlux']
+    agFermDict = {}
+    for prod in fermProdList:
+        data = getAgFermData(prod, fermData, parChiDf)
+        agFermDict[prod] = data
+    return agFermDict
+        
+
 def getAgFermData(colName, fermData, parChildDf):
     """ 
     get aggregated fermentation data
@@ -207,6 +220,10 @@ def getAgFermData(colName, fermData, parChildDf):
         pvalName = 'pval'
         result[pvalName] = ttestResult
         result.sort_values(pvalName, inplace=True)
+        
+        # add log2 column
+        result['logRatio'] = np.log2(result['ratio'])
+        
     return result
         
         

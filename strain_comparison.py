@@ -47,6 +47,9 @@ rootStrainID = 'LL1004'
 distMat = None
 newMutMat = None
 lostMutMat = None
+newMutID = None
+lostMutID = None
+sharedMutID = None
 
     
 def find_origin_mutations(inMut, strainTbl):
@@ -139,7 +142,11 @@ def findRepeatOriginMut(originMutDf, inMut, strainTbl):
                 repeatOriginMuts.append(index)
                 print('findRepeatOriginMut ERROR: mutation {0} from strain {1} found in parent strain {2}'.format(row['mutID'], row['Strain'], parId))
     
-            parId = parChiDf.loc[parChiDf['StrainID'] == parId, 'ParentID'].iloc[0] # find parent of parent
+            testPar = parChiDf.loc[parChiDf['StrainID'] == parId, 'ParentID']
+            if len(testPar) > 0:
+                parId = testPar.iloc[0] # find parent of parent
+            else:
+                parId = np.nan
     
     result = originMutDf.loc[originMutDf.index.isin(repeatOriginMuts), :]
     return result
@@ -325,14 +332,19 @@ def make_distance_matrix(allAnno, minReadFrac = 0.80):
     
     # make empty distance matrix
     # these are global variables
-    #global distMat
-    #global newMutMat
-    #global lostMutMat
+    global distMat
+    global newMutMat
+    global lostMutMat
+    global newMutID
+    global lostMutID
+    global sharedMutID
+    
     distMat = pd.DataFrame(None, index=strList, columns = strList )
     newMutMat = pd.DataFrame(None, index=strList, columns = strList )
     lostMutMat = pd.DataFrame(None, index=strList, columns = strList )
     newMutID = pd.DataFrame(None, index=strList, columns = strList )
     lostMutID = pd.DataFrame(None, index=strList, columns = strList )
+    sharedMutID = pd.DataFrame(None, index=strList, columns = strList )
     
     # make distance matrix
     for par in strList:
@@ -357,7 +369,10 @@ def make_distance_matrix(allAnno, minReadFrac = 0.80):
             distVal = len(newMutSet) + len(parSetAll.difference(chiSetAll) )
             distMat.set_value(par, chi, distVal )
             
-    return (distMat, newMutMat, lostMutMat, newMutID, lostMutID)
+            sharedMut = parSetHigh.intersection(chiSetHigh)
+            sharedMutID.set_value(par, chi, sharedMut)
+            
+    return (distMat, newMutMat, lostMutMat, newMutID, lostMutID, sharedMutID)
             
     
 def findZeroDistStrainPairs(distMat):
@@ -420,8 +435,95 @@ def compare_mutations(parStr, chiStr, mutDf, mutType):
     result['readFrac'] = result['readFrac'].round(2) # clean up decimal places
     return result    
  
+ 
+def calcParentScoreMat(lostMutID, sharedMutID):
+    """
+    the parentScore is used to find the most likely parent of a given strain (i.e. the one with
+    the lowest parentScore)
+    it takes into account 2 competing factors:
+        1. Reduce the number of cases where a mutation present in the parent strain is lost
+        in the child strain (i.e. "lost" mutations)
+        2. Reduce the number of new origin mutations that will be identified.  If the child strain
+        contains mutations not found in any other strain, these mutations will always be classified
+        as origin mutations, regardless of the lineage structure.  So for this analysis we ignore them.
+        To do this, we calculate the maximum number of mutations shared between the target strain and 
+        all other strains "maxShared."  The difference between "maxShared" and "num shared" for any 
+        potential parent strain, is the number of new origin mutations that will be created if that
+        parent strain is assigned as the parent of the target strain.
+        
+    Assume that make_distance_matrix has already been run, and that the matricies are available
+    as global variables.
     
-def findBestParentStrain(chiStrain, distMat, newMutMat, lostMutMat, newID, lostID):
+    If no parent strain is given (i.e. parStr = None), then find the best parent strain.
+    """
+    
+    # calculated maxShared for each strain in the sharedMutID matrix
+    sharedNumMat = sharedMutID.applymap(lambda x: len(x))
+    # self-matches always have the highest score, so these need to be removed
+    for i in sharedNumMat.index:
+        sharedNumMat.loc[i,i] = -1 # use -1 as a "data removed" flag
+    
+    # the maximum number of shared mutations for a given strain
+    maxSharedSer = sharedNumMat.max()
+    
+    # the number of new origin mutations that will be created for a given parent-child combination
+    newOriMat = maxSharedSer - sharedNumMat
+    
+    # calculate numLost for each strain
+    numLostMat = lostMutID.applymap(lambda x: len(x))
+    
+    # calculate the parent score matrix
+    # I'm considering the possibility of weighting the 2 pieces differently
+    parentScoreMat = newOriMat + numLostMat
+        
+    return parentScoreMat
+    
+    
+def compareKnownVsCalcLineage(lostMutID, sharedMutID, llStrTbl, mutDf):
+    """
+    calculate the parScore for the known parent-child strain pairs
+    also determine the best score and the strain associated with that score
+    lostMutID and sharedMutID are from make_distance_matrix
+    llStrTbl is the LLStrains.xlsx dataframe
+    mutDf is a dataframe with all mutations
+    """
+    # calculate the parent score matrix
+    psMat = calcParentScoreMat(lostMutID, sharedMutID)
+    
+    lMat = lostMutID.applymap(lambda x: len(x))
+    
+    strList = mutDf.loc[:,'Strain'].unique().tolist()
+    parHasMuts = llStrTbl['StrainID'].isin(strList)
+    chiHasMuts = llStrTbl['ParentID'].isin(strList)
+    
+    # find the best parent strain based on the parentScore
+    bestStrDf = pd.DataFrame(0,  index = strList, columns = ['bestStr', 'bestScore'])
+    for str in strList:
+        bestStr = psMat.loc[:, str].idxmin()
+        bestScore = psMat.loc[:, str].min()
+        bestStrDf.loc[str] = [bestStr, bestScore]
+    
+    # find the parentStrain score for the parent-child pairs in the LLStrain table
+    temp2 = llStrTbl.loc[parHasMuts & chiHasMuts, ['StrainID', 'ParentID']]
+    temp2['parScore'] = temp2.apply(lambda row: psMat.loc[row['ParentID'], row['StrainID']], axis = 1)
+    
+    
+    temp2['numLost'] = temp2.apply(lambda row: lMat.loc[row['ParentID'], row['StrainID']], axis=1)
+    
+    
+    temp2.set_index('StrainID', inplace = True)
+    temp2 = temp2.merge(bestStrDf, how = 'left', left_index = True, right_index = True)
+    temp2['numLostAlt'] = temp2.apply(lambda row: lMat.loc[row['bestStr'], row.name], axis=1)
+    
+    temp2['score diff'] = temp2['parScore'] - temp2['bestScore']
+    
+    result = temp2.sort_values('numLost', ascending = False)
+    
+    
+    return result
+
+
+def findBestParentStrain(chiStrain, distMat, newMutMat, lostMutMat, newID, lostID, sharedID):
     """
     given a strain, find the strain most likely to be its parent, based on mutation data
     algorithm summary:
@@ -453,9 +555,24 @@ def findBestParentStrain(chiStrain, distMat, newMutMat, lostMutMat, newID, lostI
                 minNew = row
                 counter += 1
             
-            resultList.append([index, counter, i, row, distMat.loc[index, chiStrain], lostID.loc[index, chiStrain], newID.loc[index, chiStrain]])
+            resultList.append([index, 
+                               counter, 
+                               i, 
+                               row, 
+                               distMat.loc[index, chiStrain], 
+                               lostID.loc[index, chiStrain], 
+                               newID.loc[index, chiStrain], 
+                               sharedID.loc[index, chiStrain]])
     
-    result = pd.DataFrame(resultList, columns=['Strain', 'Order', 'num lost', 'num new', 'Distance', 'lostMutID', 'newMutID']).set_index('Strain')
+    result = pd.DataFrame(resultList, columns=['Strain', 
+                                               'Order', 
+                                               'num lost', 
+                                               'num new', 
+                                               'Distance', 
+                                               'lostMutID', 
+                                               'newMutID',
+                                               'sharedMutID'
+                                               ]).set_index('Strain')
     
     return result
       
