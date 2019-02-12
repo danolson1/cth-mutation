@@ -544,6 +544,10 @@ def annotate_best_CDS(uniqueMutDf, allAnnoDf):
     
     # make series to hold "Locus description"
     locusDescriptionSer = pd.Series(data=['']*len(uniqueMutDf), index=uniqueMutDf.index )
+
+    # make series to hold "Best locus tag"
+    # this is useful for correlating other data (like gene expression data) with the mutation
+    bestLocusTagSer = pd.Series(data=['']*len(uniqueMutDf), index=uniqueMutDf.index )
     
     # run annotate_all_CDS to get list of CDS annotations
     #allAnnoDf = adc5.annotate_from_gb(inMutDf, 'Cth DSM 1313 genome-111816v2.gbk')
@@ -566,6 +570,7 @@ def annotate_best_CDS(uniqueMutDf, allAnnoDf):
         if len(annoInCds) == 1:
             annNameSer[index] = bestName(annoInCds.iloc[0])
             locusDescriptionSer[index] = annoInCds.iloc[0].loc['Locus description']
+            bestLocusTagSer[index] = annoInCds.iloc[0].loc['Locus Tag']
         
         # if the mutation covers multiple CDSs, note the first and last CDS
         elif len(annoInCds) > 1:
@@ -574,7 +579,8 @@ def annotate_best_CDS(uniqueMutDf, allAnnoDf):
             endName = bestName(annoInCds.iloc[-1]) # last row
             annNameSer[index] = startName + '-' + endName
             locusDescriptionSer[index] = 'multiple loci'
-    
+            bestLocusTagSer[index] = annoInCds.iloc[0].loc['Locus Tag'] # use the locus tag of the first row
+            
         # if the mutation is not in a CDS, len(annoInCds) == 0
         # see if it's upstream of a CDS
         elif len(annoInCds) == 0 and len(annoUpCds) > 0:
@@ -589,12 +595,15 @@ def annotate_best_CDS(uniqueMutDf, allAnnoDf):
             else:
                 annNameSer[index] = str(minDist) + ' bp upstream of ' + bestName(df.iloc[0])
                 locusDescriptionSer[index] = df.iloc[0].loc['Locus description']
+                bestLocusTagSer[index] = df.iloc[0].loc['Locus Tag'] 
                 #raise StopIteration
     
     # add 'annotation name' series onto original mutation dataframe
     uniqueMutDf['Annotation name'] = annNameSer
     
     uniqueMutDf['Locus description'] = locusDescriptionSer
+    
+    uniqueMutDf['Locus Tag'] = bestLocusTagSer # keep this named 'Locus Tag' to maintain compatibility with annotateAll
        
     # choose columns we want to keep
     result = uniqueMutDf[['Chromosome', 
@@ -604,6 +613,7 @@ def annotate_best_CDS(uniqueMutDf, allAnnoDf):
                           'Description',
                           'mutID', 
                           'Annotation name',
+                          'Locus Tag',
                           'Locus description'
                           ]]
     

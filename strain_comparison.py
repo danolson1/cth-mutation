@@ -40,7 +40,7 @@ sys.path.insert(0, r'C:\Users\Dan\Documents\GitHub\cth-mutation') # for loading 
 mslPath = r'C:\Users\Dan\Documents\Lynd Lab research\Ctherm CBP project\Big database project  - SFRE\--MANUSCRIPT--\Master strain list 11-29-2016.xlsx'
 
 # for finding origin mutations
-rootStrainID = 'LL1004'
+rootStrainID = 'LL1004' # this needs to be changed if we're working with an organism other than C. therm
 
 # distance matricies
 # module-level variables because we only expect to have one set per instance
@@ -60,10 +60,13 @@ def find_origin_mutations(inMut, strainTbl):
     
     strainTbl needs to have the following columns:
         "StrainID" with the strain ID and
-        "Parent strain" with the parent strain ID
+        "ParentID" with the parent strain ID
     inMut is a list of mutations.  It needs to have the following columns:
         "mutID," unique mutation identifier
         "Strain," strain ID
+        
+    Returns a table of mutations with the column 'isOrigin' added
+    This column can be used as a boolean filter for origin mutations
     """
     # first find the list of strains that have mutations in the mutation table 
     strainList = inMut['Strain'].unique().tolist()
@@ -77,14 +80,14 @@ def find_origin_mutations(inMut, strainTbl):
     inMut.drop('StrainID', axis=1, inplace=True) # don't need to have this column shown twice
     
     # make series to hold origin mutation flag, start with all false values
-    originMutSer = pd.Series([False] * len(inMut)) 
+    originMutSer = pd.Series(data = False, index = inMut.index) 
     for index, row in inMut.iterrows():
         # if mutation is not in parent strain, it's an origin mutation
         #print(index, 'checking mutID=', row['mutID'])
         pID = row['ParentID']
         if row['mutID'] not in inMut.loc[inMut['Strain'] == pID, 'mutID'].get_values():
             # found origin mutation
-            #print('\tfound origin mutation, mutID=', row['mutID'], ' strain=', row['StrainID'])
+            #print('\tfound origin mutation, mutID=', row['mutID'], ' strain=', row['Strain'])
             originMutSer.loc[index] = True
     
     # add new columns
