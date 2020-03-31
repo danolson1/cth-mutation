@@ -484,7 +484,7 @@ def annotate_all_CDS(inUniqueMutDf, inCdsDf):
     upRevDf['Source'] = 'upRevDf'
     withinCds['Source'] = 'withinCds'
     # re-combine tables
-    cdsOverlap = pd.concat([upFwdDf, upRevDf, withinCds]).sort_values('Start')
+    cdsOverlap = pd.concat([upFwdDf, upRevDf, withinCds], sort = True).sort_values('Start')
     cdsOverlap.rename(columns={'Description_x':'Description'}, inplace=True)
     
     # select desired columns
