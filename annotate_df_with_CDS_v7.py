@@ -20,7 +20,8 @@ Outputs:
        one per mutation) 
 
 Dan Olson
-10-24-2016
+version 7
+3-30-2020
 #####################################################################################################
 """
 
@@ -280,63 +281,69 @@ def map_unique_mutid_to_mut(uniqueMut, inMutDf):
 #--------------------------------------------------------------------------------------
 def make_annotation_table(genbankFileName):
     """ given a file name, make a table of annotations """
-    record  = SeqIO.read(genbankFileName, 'genbank')
     rowList = [] # list to hold rows
-    for feature in record.features:
-        if feature.type == 'CDS':
-            desc = None # default value  Without this you get an error when you try to store disc in a dictionary later
-            #check to see if the feature has a label
-            if 'label' in feature.qualifiers.keys(): 
-                l = feature.qualifiers['label'][0]
-            else:
-                l = ''   
-            #check to see if the feature has a locus tag
-            if 'locus_tag' in feature.qualifiers.keys(): 
-                lt = feature.qualifiers['locus_tag'][0]
-            else:
-                lt = ''
-            
-            #check to see if the feature has a note
-            if 'note' in feature.qualifiers.keys(): 
-                noteStr = feature.qualifiers['note'][0]
-                # split into individual strings based on semicolon
-                noteList = [x.strip() for x in noteStr.split(';')]
-                # split again by colon
-                noteList2 = [x.split(': ') for x in noteList]
-                noteDict = {x[0]: x[-1] for x in noteList2}
-                #print('****noteDict****')
-                #for key, value in noteDict.items():
-                #    print(key, '\t\t -->', value)
-                # choose one key as description
-                # first PFAM, if it exists, then TIGRFAM, then KEGG
-                if 'PFAM' in noteDict.keys():
-                    desc = noteDict['PFAM']
-                elif 'TIGRFAM' in noteDict.keys():
-                    desc = noteDict['TIGRFAM']
-                elif 'KEGG' in noteDict.keys():
-                    desc = noteDict['KEGG']
-                elif 'SMART' in noteDict.keys():
-                    desc = noteDict['SMART']
+    records = list(SeqIO.parse(genbankFileName, 'genbank')) # to deal with multiple DNA sequences in a single file
+    for record in records:
+        for feature in record.features:
+            if feature.type == 'CDS':
+                desc = None # default value  Without this you get an error when you try to store disc in a dictionary later
+                #check to see if the feature has a label
+                if 'label' in feature.qualifiers.keys(): 
+                    l = feature.qualifiers['label'][0]
                 else:
-                    # if the note parsing didn't work, include the whole string
-                    desc = noteStr 
-                    print('ANNOTATION PROBLEM the following text in locus %s could not be parsed:\n\"%s\"' %(lt, desc))
-            
-            
-            #store results in a dictionary
-            d = {'Label': l,
-                 'Locus Tag': lt,
-                 'Strand': feature.location.strand,
-                 'Start': feature.location.start.position,
-                 'End': feature.location.end.position,
-                 'Description': desc}
-            rowList.append(d)
+                    l = ''   
+                #check to see if the feature has a locus tag
+                if 'locus_tag' in feature.qualifiers.keys(): 
+                    lt = feature.qualifiers['locus_tag'][0]
+                else:
+                    lt = ''
+                
+                #check to see if the feature has a note
+                if 'note' in feature.qualifiers.keys(): 
+                    noteStr = feature.qualifiers['note'][0]
+                    # split into individual strings based on semicolon
+                    noteList = [x.strip() for x in noteStr.split(';')]
+                    # split again by colon
+                    noteList2 = [x.split(': ') for x in noteList]
+                    noteDict = {x[0]: x[-1] for x in noteList2}
+                    #print('****noteDict****')
+                    #for key, value in noteDict.items():
+                    #    print(key, '\t\t -->', value)
+                    # choose one key as description
+                    # first PFAM, if it exists, then TIGRFAM, then KEGG
+                    if 'PFAM' in noteDict.keys():
+                        desc = noteDict['PFAM']
+                    elif 'TIGRFAM' in noteDict.keys():
+                        desc = noteDict['TIGRFAM']
+                    elif 'KEGG' in noteDict.keys():
+                        desc = noteDict['KEGG']
+                    elif 'SMART' in noteDict.keys():
+                        desc = noteDict['SMART']
+                    else:
+                        # if the note parsing didn't work, include the whole string
+                        desc = noteStr 
+                        print('ANNOTATION PROBLEM the following text in locus %s could not be parsed:\n\"%s\"' %(lt, desc))
+                
+                # if the feature has a label, but no description, set the description as the label
+                if desc is None:
+                    desc = l
+                
+                #store results in a dictionary
+                d = {'Label': l,
+                     'Locus Tag': lt,
+                     'Strand': feature.location.strand,
+                     'Start': feature.location.start.position,
+                     'End': feature.location.end.position,
+                     'Description': desc,
+                     'Chromosome': record.name
+                     }
+                rowList.append(d)
     cdsDf = pd.DataFrame(rowList)
     # organize columns
-    cdsDf = cdsDf[['Label', 'Locus Tag', 'Strand', 'Start', 'End', 'Description']]
+    cdsDf = cdsDf[['Chromosome', 'Label', 'Locus Tag', 'Strand', 'Start', 'End', 'Description']]
     
     # add columns
-    cdsDf['Chromosome'] = record.name
+    #cdsDf['Chromosome'] = record.name
     return cdsDf
 
 
