@@ -100,7 +100,7 @@ blastSubjectFiles = ['insertion_sequences.fa', # pyk(Tsc), pta merodiploid and S
 # see cleanLowThreshold function
 minLowCoverageLength = 50 # ignore low coverage regions shorter than this
 maxAverageReadCoverage = 2 # ignore regions with maximum coverage higher than this
-chromosomeList = ['Cth_DSM_1313_genome']
+chromosomeList = ['Cth_DSM_1313_genome', 'C_thermocellum_DSM1313_genome']
 
 ############################################################
 
