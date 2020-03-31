@@ -72,8 +72,6 @@ maxDeletionDistanceError = 20 # replaced by isSameRegion function, need to delet
 # for isSameRegion function
 minOverlapThresh = 0.98 # mutations must be 98% overlapped to be considered identical
 
-maxHitEndDistance = 200 # maximum distance between BLAST hit and end of sequence, important for insertions
- 
 eValue = 1e-6 # default E-value to use for BLAST searches
 minNumReads = 3 # for filtering breakpoints (comparison uses >= constraint)
 minLength = 15 # for filtering breakpoints
@@ -692,11 +690,30 @@ def cleanSnpMutations(rawSnp):
     return cleanRawSnp    
     
 
-def match_insertions(identifiedBp, maxDist, seqList, filterByDist = False, filterByEndDist = False):
-    # select just the breakpoints with BLAST hits from the list of sequences from seqName
-    # for example, if seqName is 'Cth_transposons.fa', just match transposons
-    # the maxHitEndDistance is a constant that is set at the top of the file
-    transpDf = identifiedBp[identifiedBp['BLAST source'] == seqList]
+def match_insertions(identifiedBp, maxDist, max_hit_end_dist = 200, seqList = None, filterByDist = False, filterByEndDist = False):
+    """ 
+    Match breakpoints with known insertion sequences
+    Parameters:
+        identifiedBp - dataframe of identified breakpoints. This comes from nameBreakpointWithBlast
+        maxDist - maximum distance between breakpoints on the chromosome. Used when filterByDist = True. In general, 
+                close breakpoints are more likely to be a correct match. The exception is when a large chromosomal rearrangement
+                or duplication happens
+        seqList - the name of the sequence used for identifying the BLAST hit. For example, insertion_sequences.fa. This parameter
+                allows the match_insertion parameters to be adjusted for matching different types of insertions.
+        max_hit_end_distance - maximum allowable distance between the start of the BLAST hit and the start (or end) of the sequence
+                This is important for correctly matching known insertions
+    
+    """
+    
+    # filtering by seqList allows different paramerts to be applied for matching different sets of breakpoints
+    # for example, breakpoints that matched to transposon sequences should be processed differently than 
+    # breakpoints that matched insertion sequences
+    if seqList is not None:
+        # select just the breakpoints with BLAST hits from the list of sequences from seqName
+        # for example, if seqName is 'Cth_transposons.fa', just match transposons
+        transpDf = identifiedBp[identifiedBp['BLAST source'].isin(seqList)]
+    else:
+        transpDf = identifiedBp # don't filter breakpoints
     
     # check to see if transpDf is empty
     if len(transpDf) == 0:
@@ -705,14 +722,13 @@ def match_insertions(identifiedBp, maxDist, seqList, filterByDist = False, filte
               'This error can be ignored')
     
     # split transposons into left and right groups and only keep the relevant columns
-    transpDfLeft = transpDf.loc[transpDf['Name'] == 'Left breakpoint', :].reindex(columns = ['Strain','Sample', 'Chromosome', 
-                                                                        'Hit Name', 'Seq Name', 'StartReg', 
-                                                                        'EndReg', 'readFrac', 
-                                                                        'BP distance', 'Hit end distance'])
-    transpDfRight = transpDf.loc[transpDf['Name'] == 'Right breakpoint', :].reindex(columns =  ['Strain','Sample','Chromosome', 
-                                                                          'Hit Name', 'Seq Name', 'StartReg',
-                                                                          'EndReg', 'readFrac', 
-                                                                          'BP distance', 'Hit end distance'])
+    # list of columns to keep
+    good_cols = ['Strain','Sample', 'Chromosome', 
+                'Hit Name', 'Seq Name', 'StartReg', 
+                'EndReg', 'readFrac', 
+                'BP distance', 'Hit end distance', 'e-value', 'BLAST source']
+    transpDfLeft = transpDf.loc[transpDf['Name'] == 'Left breakpoint', :].reindex(columns = good_cols)
+    transpDfRight = transpDf.loc[transpDf['Name'] == 'Right breakpoint', :].reindex(columns = good_cols)
     
     # do an inner join of left and right sets of breakpoints
     # match all breakpoints with the same name and chromosome
@@ -735,10 +751,12 @@ def match_insertions(identifiedBp, maxDist, seqList, filterByDist = False, filte
     
     # filter by end distance (i.e. the distance between where the breakpoint starts matching and 
     # the start of the sequence).  Real insertion sequences have breakpoints that match only at the
-    # ends (i.e. Hit end distance is close to 0).  This is not important for other types of mutations
+    # ends (i.e. Hit end distance is close to 0).  
+    # This is particularly important for merodiploid insertions, where internal matches are likely
+    # This is not important for other types of mutations
     if filterByEndDist:
-        correctRDist = (lr['Hit end distance R'].abs() < maxHitEndDistance)
-        correctLDist = (lr['Hit end distance L'].abs() < maxHitEndDistance)
+        correctRDist = (lr['Hit end distance R'].abs() < max_hit_end_dist)
+        correctLDist = (lr['Hit end distance L'].abs() < max_hit_end_dist)
         lr = lr.loc[correctRDist & correctLDist, :]
         # if there are several matches for a given breakpoint, choose the one with the shortest end distances
         # allEndDist is a composite of the left and right BP distances and hit end distances
@@ -754,7 +772,7 @@ def match_insertions(identifiedBp, maxDist, seqList, filterByDist = False, filte
     # add new columns as necessary
     result['readFrac'] = (result['readFrac L'] + result['readFrac R']) / 2
     result['Type'] = 'Insertion'
-    result['Source'] = 'match_insertion_' + seqList[:5] # add first 6 letters of seq list to distinguish origins 
+    result['Source'] = 'match_insertion_' + result['BLAST source L'].str[:5] # add first 6 letters of seq list to distinguish origins 
     
     # rename columns
     # for deletions, the StartReg coordinate will always be lower than the EndReg coordinate
