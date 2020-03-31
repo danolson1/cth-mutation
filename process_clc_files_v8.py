@@ -676,6 +676,10 @@ def cleanSnpMutations(rawSnp):
     # fix chromosome spaces
     rawSnp['Chromosome'] = rawSnp['Chromosome'].apply(fixChromosomeSpaces)
     
+    # get rid of reference alleles (i.e. where the Allele is the same as the Reference)
+    ref_alleles = (rawSnp['Reference'] == rawSnp['Allele'])
+    rawSnp = rawSnp.loc[~ref_alleles, :]
+    
     # select columns to keep
     colList = [  'Strain',
                  'Sample',
