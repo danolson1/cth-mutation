@@ -40,8 +40,8 @@ Source	    Python function that generated the result
 AlleleID	Used for matching known mutations to expected mutations to confirm strain construction
 
 Dan Olson
-11-16-2016
-version 4
+3-30-2020
+version 8
 Uses Anaconda3 as the python interpreter
 #####################################################################################################
 """
@@ -492,7 +492,7 @@ def cleanLowThreshold(lowThresh, cleanHighThr):
     lowReadCoverage = lowThresh['avg cov'] < maxAverageReadCoverage # constant value set at top of file
     
     # files might not have a 'Sample' column. If not, copy the 'Strain' column to 'Sample
-    if (lowThresh.columns.contains('Sample')):
+    if ('Sample' in lowThresh.columns):
         pass
     else:
         lowThresh['Sample'] = lowThresh['Strain']
@@ -603,7 +603,7 @@ def cleanStructuralVariants(rawSv, cleanLowThresh):
     insertionDf = None
     replacementDf = None
     
-    if len(deletionDf > 0):
+    if len(deletionDf) > 0:
         cleanDeletionDf = deletionDf.merge(cleanLowThresh, how='left', on=['Strain','Sample', 'Chromosome'])
         
         # use isSameRegion to find close matches for start and end regions 
