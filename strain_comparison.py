@@ -85,7 +85,7 @@ def find_origin_mutations(inMut, strainTbl):
         # if mutation is not in parent strain, it's an origin mutation
         #print(index, 'checking mutID=', row['mutID'])
         pID = row['ParentID']
-        if row['mutID'] not in inMut.loc[inMut['Strain'] == pID, 'mutID'].get_values():
+        if row['mutID'] not in list(inMut.loc[inMut['Strain'] == pID, 'mutID']):
             # found origin mutation
             #print('\tfound origin mutation, mutID=', row['mutID'], ' strain=', row['Strain'])
             originMutSer.loc[index] = True
