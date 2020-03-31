@@ -1202,7 +1202,8 @@ def nameBreakpointWithBlast(breakPointDf, blastSubjectList):
     """
     assign names to breakpoints by sequential BLAST search against local fasta files and nr
         breakPointDf is a dataframe with the breakpoints to be matched
-        blastSubjectList holds the subject sequences and iscreated by the function make_blast_subject_list
+        blastSubjectList holds the subject sequences and is created by the function make_blast_subject_list
+        the subject sequences are sorted by most specific to most general to make sure the breakpoints are named with the most specific annotation
     Overview:
     1. breakpoints are searched against each local file in order
     2. matching breakpoints are named
