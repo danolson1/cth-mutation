@@ -56,7 +56,6 @@ import pandas as pd
 import time
 from Bio import SearchIO
 from Bio import SeqIO
-from Bio.Alphabet import IUPAC   # the alphabet we want is IUPACUnambiguousDNA
 from Bio.Blast import NCBIWWW
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -1014,7 +1013,7 @@ def get_clc_data_from_txt(filePath = clcDataFilePath):
                 else:
                     fileType  = fileType + '_low10'
     
-            if result[0][5] is '': # the file doesn't have a value in the fileVers location
+            if result[0][5] == '': # the file doesn't have a value in the fileVers location
                 fileVers = 0
             else:
                 fileVers = int(result[0][5]) # get the value
@@ -1473,7 +1472,7 @@ def dataFrameToMultiFasta(inputDf, seqCol='Unaligned', outFileName = 'temp.fa'):
 
     bpSeqRecordList = [] #list to hold the sequence records before writing to file
     for index, row in inputDf.iterrows():
-        tempSeqRecord = SeqRecord(Seq(row[seqCol], IUPAC.unambiguous_dna),
+        tempSeqRecord = SeqRecord(Seq(row[seqCol]),
                                   id=str(index), #this needs to be a string for the SeqRecord function
                                   name='',
                                   description='')
